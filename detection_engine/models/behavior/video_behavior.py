@@ -500,22 +500,45 @@ class VideoBehaviorDetector:
         try:
             # 尝试加载标准模型
             standard_model_path = Path("models/standard/theft_xgb_model.pkl")
-            if standard_model_path.exists():
-                with open(standard_model_path, 'rb') as f:
-                    self.standard_model = pickle.load(f)
-                self.logger.info(self.localization["loading_model_success"].format(
-                    self.localization["standard_model"]))
+            alt_standard_path = Path("models/theft_xgb_model.pkl")
+            std_path = standard_model_path if standard_model_path.exists() else alt_standard_path
+            if std_path.exists():
+                try:
+                    with open(std_path, 'rb') as f:
+                        loaded = pickle.load(f)
+                    # 处理 dict 格式 {'model': XGBClassifier, 'label_encoder': ...}
+                    if isinstance(loaded, dict) and 'model' in loaded:
+                        loaded = loaded['model']
+                    # 检查是否有 predict 方法（训练过的模型才有）
+                    if hasattr(loaded, 'predict'):
+                        self.standard_model = loaded
+                        self.logger.info(self.localization["loading_model_success"].format(
+                            self.localization["standard_model"]))
+                    else:
+                        self.logger.debug(f"标准模型无predict方法(未训练), 跳过: {std_path}")
+                        self.standard_model = None
+                except Exception as e:
+                    self.logger.debug(f"标准模型加载失败: {e}")
+                    self.standard_model = None
             else:
-                self.logger.warning(self.localization["model_file_not_exist"].format(
-                    self.localization["standard_model"], standard_model_path))
+                self.logger.debug(self.localization["model_file_not_exist"].format(
+                    self.localization["standard_model"], std_path))
             
             # 尝试加载增强模型
             enhanced_model_path = Path("models/enhanced/enhanced_theft_xgb_model.pkl")
             if enhanced_model_path.exists():
-                with open(enhanced_model_path, 'rb') as f:
-                    self.enhanced_model = pickle.load(f)
-                self.logger.info(self.localization["loading_model_success"].format(
-                    self.localization["enhanced_model"]))
+                try:
+                    with open(enhanced_model_path, 'rb') as f:
+                        loaded = pickle.load(f)
+                    if isinstance(loaded, dict) and 'model' in loaded:
+                        loaded = loaded['model']
+                    if hasattr(loaded, 'predict'):
+                        self.enhanced_model = loaded
+                        self.logger.info(self.localization["loading_model_success"].format(
+                            self.localization["enhanced_model"]))
+                except Exception as e:
+                    self.logger.debug(f"增强模型加载失败: {e}")
+                    self.enhanced_model = None
             else:
                 self.logger.debug(self.localization["model_file_not_exist"].format(
                     self.localization["enhanced_model"], enhanced_model_path))
@@ -3304,6 +3327,11 @@ class VideoBehaviorDetector:
                 
                 # 检查加载的对象是否为字典（配置），如果是则尝试初始化实际模型
                 if isinstance(model, dict):
+                    # 先尝试直接取 model['model'] 里已经训练好的 XGBClassifier
+                    if 'model' in model and hasattr(model['model'], 'predict_proba'):
+                        self.logger.info("检测到模型配置字典，直接使用内置模型对象")
+                        return model['model']
+                    
                     self.logger.info("检测到模型配置字典，尝试初始化模型")
                     
                     # 从配置中提取模型参数
