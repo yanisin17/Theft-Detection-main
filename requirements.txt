@@ -1,0 +1,45 @@
+# ============================================================
+# TheftGuard AI - 合并版依赖（项目A行为识别引擎 + 项目B产品形态）
+# Python 3.9 - 3.11 推荐
+# ============================================================
+
+# ---------- Web 框架（项目B） ----------
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6          # FastAPI 文件上传
+websockets>=12.0                 # 实时帧推送
+
+# ---------- 计算机视觉 & 深度学习 ----------
+opencv-python>=4.8.0
+ultralytics>=8.0.0               # YOLOv11n / YOLOv8 加载器
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.24.0
+Pillow>=10.0.0
+
+# ---------- 行为识别引擎（项目A） ----------
+mediapipe>=0.10.0                # 33关键点姿态估计
+xgboost>=2.0.0                  # 行为分类器
+scikit-learn>=1.3.0             # XGBoost 特征预处理
+pandas>=2.0.0                   # 数据处理
+matplotlib>=3.7.0               # 可视化（可选，调试用）
+
+# ---------- 人脸识别（项目B，可选） ----------
+# Windows 安装需 Visual Studio Build Tools + CMake；不装则人脸面板自动禁用
+face_recognition>=1.3.0
+
+# ---------- 系统监控（项目B，可选） ----------
+psutil>=5.9.0                   # CPU/RAM 实时占用
+
+# ---------- 通知 & 配置（项目B） ----------
+requests>=2.31.0                # Telegram API
+python-dotenv>=1.0.0            # .env 配置
+pydantic>=2.0.0                # FastAPI 模型校验
+
+# ============================================================
+# 说明：
+# - sqlite3 / smtplib / email / threading / uuid 等均为 Python 标准库，无需安装
+# - face_recognition 在 Windows 上若装不上，注释掉该行后系统会自动降级（人脸面板禁用）
+# - torch 建议按官方指南安装 CUDA 版本以启用 GPU 加速
+#   https://pytorch.org/get-started/locally/
+# ============================================================

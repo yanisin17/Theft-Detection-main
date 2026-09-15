@@ -1,0 +1,61 @@
+@import "tailwindcss";
+
+@theme inline {
+  /* ---- 浅色主题 Token ---- */
+  --color-background: #f5f7fb;           /* 页面底色：浅灰蓝 */
+  --color-foreground: #1e293b;           /* 正文：深蓝灰（高对比） */
+  --color-brand: #2563eb;                /* 主色：深蓝（比原蓝更实，白底上清晰） */
+  --color-danger: #dc2626;               /* 告警红 */
+  --color-glass: rgba(255, 255, 255, 0.7);        /* 卡片玻璃：白底半透明 */
+  --color-glass-border: rgba(15, 23, 42, 0.08);   /* 卡片边框：淡灰 */
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+html, body {
+  background-color: var(--color-background);
+  color: var(--color-foreground);
+  /* 去掉深色径向渐变，换成极淡蓝晕保持科技感 */
+  background-image:
+    radial-gradient(at 0% 0%, rgba(37, 99, 235, 0.06) 0px, transparent 50%),
+    radial-gradient(at 100% 100%, rgba(220, 38, 38, 0.04) 0px, transparent 50%);
+  background-attachment: fixed;
+  min-height: 100vh;
+}
+
+.glass-panel {
+  background: var(--color-glass);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--color-glass-border);
+  border-radius: 1rem;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04), 0 4px 16px rgba(15, 23, 42, 0.04);
+}
+
+.glass-header {
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-bottom: 1px solid var(--color-glass-border);
+}
+
+/* Tailwind 输入框/选择框/按钮 在浅色下的默认覆盖 */
+input, select, textarea {
+  color-scheme: light;
+}
+
+/* 告警脉冲动画（红 + 白底上可见） */
+.alert-pulse {
+  animation: pulse-border 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes pulse-border {
+  0%, 100% {
+    border-color: rgba(220, 38, 38, 0.25);
+    box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.35);
+  }
+  50% {
+    border-color: rgba(220, 38, 38, 0.85);
+    box-shadow: 0 0 18px 2px rgba(220, 38, 38, 0.5);
+  }
+}

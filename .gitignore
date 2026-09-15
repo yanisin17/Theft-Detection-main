@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+test02/
+test03/
+.venv/
+venv/
+
+# Node.js
+node_modules/
+.next/
+dashboard/node_modules/
+dashboard/.next/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Runtime generated
+alerts/
+evidence_videos/
+*.log
+logs/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Models (too large for git)
+*.pt
+*.pkl

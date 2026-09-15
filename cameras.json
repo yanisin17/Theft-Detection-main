@@ -1,0 +1,14 @@
+[
+    {
+        "id": "e584cf4e-9f4d-480b-bcce-4d1dac35b516",
+        "name": "test1",
+        "source": "rtsp://admin:a12345678@172.30.20.64:554/Streaming/Channels/102",
+        "roi_points": []
+    },
+    {
+        "id": "74be4f22-6d03-4cba-8158-2f47c73dc143",
+        "name": "test2",
+        "source": "rtsp://admin:a12345678@172.30.20.63:554/Streaming/Channels/102",
+        "roi_points": []
+    }
+]
