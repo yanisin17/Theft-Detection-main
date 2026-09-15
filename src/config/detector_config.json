@@ -37,7 +37,7 @@
   },
   "default_behavior_threshold": 0.3,
   "retail_environment": {
-    "enabled": true,
+    "enabled": false,
     "confidence_boost": 0.2,
     "required_objects": ["shelf", "product", "display"],
     "boost_behaviors": ["Rapid Item Concealment", "Suspicious Item Handling", "Taking Object", "Hiding Item", "Single Arm Hiding"]

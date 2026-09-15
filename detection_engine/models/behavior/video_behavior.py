@@ -1,4 +1,4 @@
-﻿import os
+import os
 import cv2
 import time
 import torch
@@ -517,7 +517,7 @@ class VideoBehaviorDetector:
                 self.logger.info(self.localization["loading_model_success"].format(
                     self.localization["enhanced_model"]))
             else:
-                self.logger.warning(self.localization["model_file_not_exist"].format(
+                self.logger.debug(self.localization["model_file_not_exist"].format(
                     self.localization["enhanced_model"], enhanced_model_path))
             
             # 确定使用哪个模型
