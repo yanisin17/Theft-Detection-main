@@ -704,11 +704,58 @@ async def get_camera_roi(camera_id: str):
 
 
 # --- 项目A行为引擎实时检测参数 ---
-BEHAVIOR_ALERT_THRESHOLD = 0.7   # 行为置信度达到该值才报警
+BEHAVIOR_ALERT_THRESHOLD = 0.7   # 高风险行为置信度达到该值才报警
 BEHAVIOR_CHECK_INTERVAL = 6      # 每隔多少帧对同一个人做一次21种行为分析
 PERSON_GRACE_SECONDS = 10.0      # track_id 消失超过该秒数后清理状态（再次出现可重新报警）
+
+# 行为分档阈值：不是所有行为都同等重要
+BEHAVIOR_TIERS = {
+    # 高风险：直接关联盗窃动作，0.7 就报警
+    "HIGH": {"rapid_item_concealment", "item_concealment", "item_grabbing",
+             "suspicious_item_handling", "single_arm_hiding", "body_shielding",
+             "concealment_gesture", "distraction_behavior", "suspected_tag_removal",
+             "group_theft_coordination", "ML Detected Theft"},
+    # 中风险：可能是盗窃也可能是正常动作，0.85 才报警
+    "MEDIUM": {"suspicious_crouching", "unusual_elbow_position", "abnormal_arm_position",
+               "unusual_reaching", "repetitive_position_adjustment"},
+    # 低风险：正常购物行为，只在帧上标注但不报警
+    "LOW": {"looking_around", "abnormal_head_movement", "covering_product_area",
+            "reaching_motion", "Normal Shopping", "Checking Product"},
+}
+
+# 查询某行为类型对应的报警阈值
+def _get_behavior_alert_threshold(btype: str) -> float:
+    if btype in BEHAVIOR_TIERS["HIGH"]:
+        return BEHAVIOR_ALERT_THRESHOLD        # 0.7
+    elif btype in BEHAVIOR_TIERS["MEDIUM"]:
+        return 0.85
+    else:
+        return 1.0  # 低风险永远不触发告警
 # 正常购物行为不触发报警
 NORMAL_BEHAVIORS = {"Normal Shopping", "Checking Product", "normal_shopping", "checking_product"}
+
+# --- 行为权重表（来自项目 A 的 initial_behavior_weights）---
+BEHAVIOR_WEIGHTS = {
+    "covering_product_area": 0.5,
+    "unusual_elbow_position": 0.5,
+    "repetitive_position_adjustment": 0.5,
+    "suspected_tag_removal": 0.4,
+    "suspicious_item_handling": 0.7,
+    "rapid_item_concealment": 0.8,
+    "abnormal_arm_position": 0.6,
+    "suspicious_crouching": 0.6,
+    "unusual_reaching": 0.7,
+    "body_shielding": 0.7,
+    "abnormal_head_movement": 0.5,
+    "single_arm_hiding": 0.7,
+    "concealment_gesture": 0.7,
+    "distraction_behavior": 0.8,
+    "group_theft_coordination": 0.8,
+    "item_grabbing": 0.8,
+    "item_concealment": 0.8,
+    "looking_around": 0.4,
+    "reaching_motion": 0.5,
+}
 
 # --- State Tracker for Concealment ---
 class PersonState:
@@ -725,8 +772,17 @@ class PersonState:
         self.last_seen = time.time()
         self.alert_fired = False        # 该人是否已报过警（跨帧只报一次）
         self.alert_id = None            # 对应 alerts 表行 id，用于后续 UPDATE 峰值置信度
-        self.max_confidence = 0.0       # 该人本次出现期间的最高行为置信度
-        self.top_behavior = None        # 最高置信度对应的行为类型
+        self.max_confidence = 0.0       # 该人本次出现期间的最高偷盗概率
+        self.top_behavior = None        # 最高偷盗概率对应的主行为类型
+        # --- 完整累加系统状态 ---
+        self.behavior_frame_counts = {} # 行为类型 → 连续出现帧数（用于连续性加分）
+        self.last_behaviors = set()     # 上一帧检测到的行为集合（用于连续性检测）
+        self.rule_prob = 0.0            # 当前帧规则引擎加权概率
+        self.continuity_bonus = 0.0     # 连续性加分
+        self.sequence_bonus = 0.0       # 序列检测加分
+        self.theft_probability = 0.0    # 最终偷盗概率
+        self.sequence_detected = False  # 是否检测到抓取→隐藏完整序列
+        self.grab_phase = None          # 'left'/'right'，用于序列检测
         # 其它报警类型也按人去重
         self.blacklist_alert_fired = False
         self.roi_alert_fired = False
@@ -1033,9 +1089,7 @@ def video_loop():
                                             p_state.holding_object = False
                                             p_state.holding_hand = None
 
-                            # --- 实时行为检测：项目 A 的 VideoBehaviorDetector（21种行为 + XGBoost + 规则引擎）---
-                            # 对该 track_id 人物裁剪子图分析；同一个人整个出现周期只报警一次，
-                            # 后续更高置信度 UPDATE 同一行 MAX CONFIDENCE
+                            # --- 完整累加系统：规则引擎加权 × 连续性加分 × 序列检测 → 偷盗概率 ---
                             run_behavior = (behavior_detector is not None) and (
                                 frame_count % BEHAVIOR_CHECK_INTERVAL == 0 or is_bending
                             )
@@ -1048,68 +1102,127 @@ def video_loop():
                                     sy2 = min(frame.shape[0], box[3] + pad)
                                     sub_frame = frame[sy1:sy2, sx1:sx2].copy()
 
-                                    # 调用项目 A 的行为引擎（完整 21 种行为 + XGBoost + MediaPipe 33点）
-                                    # detections 传 YOLOv8 的 pose 结果（规则引擎需要物体类别）
+                                    # 调用项目 A 的行为引擎（21种行为 + 规则引擎）
                                     all_behaviors = behavior_detector.detect_behaviors_in_image(sub_frame, results_pose[0])
 
-                                    # 过滤出可疑行为（置信度 > 0.3），排除正常行为
-                                    suspicious = []
+                                    # 过滤 + 加权求和
+                                    current_behaviors = {}  # btype → (conf, weight)
                                     for b in all_behaviors:
                                         conf = float(b.get("confidence", 0))
-                                        btype = str(b.get("type", ""))
-                                        # 排除 ML Detected Theft 是整体二分类，取规则引擎的 21 种行为
-                                        if btype == "ML Detected Theft":
-                                            suspicious.append((conf, b))
-                                        elif conf > 0.3 and "Normal" not in btype and "Checking" not in btype:
-                                            suspicious.append((conf, b))
+                                        btype = str(b.get("type", "")).lower()
+                                        btype_original = str(b.get("type", ""))
+                                        if conf > 0.3 and "Normal" not in btype_original and "Checking" not in btype_original:
+                                            weight = BEHAVIOR_WEIGHTS.get(btype, 0.5)
+                                            current_behaviors[btype] = (conf, weight)
 
-                                    if suspicious:
-                                        # 取置信度最高的行为
-                                        suspicious.sort(key=lambda x: -x[0])
-                                        best_conf, best_behavior = suspicious[0]
-                                        best_type = str(best_behavior.get("type", "Unknown"))
+                                    # === 第 1 层：规则引擎加权概率 ===
+                                    # rule_prob = Σ (每种行为置信度 × 权重)，封顶 1.0
+                                    rule_prob = 0.0
+                                    for btype, (conf, weight) in current_behaviors.items():
+                                        rule_prob += conf * weight
+                                    p_state.rule_prob = min(1.0, rule_prob)
 
-                                        # 中文标签（从项目 A 的 behavior_type_map 取）
-                                        cn_label = best_type
-                                        if hasattr(behavior_detector, 'behavior_type_map'):
-                                            cn_label = behavior_detector.behavior_type_map.get(best_type, best_type)
+                                    # === 第 2 层：连续性加分 ===
+                                    # 同一种行为连续出现 ≥3 帧 → 每多一帧 +0.05，封顶 0.15
+                                    continuity_bonus = 0.0
+                                    for btype in current_behaviors:
+                                        if btype in p_state.last_behaviors:
+                                            p_state.behavior_frame_counts[btype] = p_state.behavior_frame_counts.get(btype, 1) + 1
+                                            count = p_state.behavior_frame_counts[btype]
+                                            if count >= 3:
+                                                bonus = min(0.15, 0.05 * (count - 2))
+                                                continuity_bonus = max(continuity_bonus, bonus)
+                                        else:
+                                            p_state.behavior_frame_counts[btype] = 1
+                                    # 消失的行为重置计数
+                                    for btype in list(p_state.behavior_frame_counts.keys()):
+                                        if btype not in current_behaviors:
+                                            del p_state.behavior_frame_counts[btype]
+                                    p_state.last_behaviors = set(current_behaviors.keys())
+                                    p_state.continuity_bonus = continuity_bonus
 
-                                        # 更新该人历史峰值
-                                        if best_conf > p_state.max_confidence:
-                                            p_state.max_confidence = best_conf
-                                            p_state.top_behavior = best_type
+                                    # === 第 3 层：序列检测（抓取 → 隐藏） ===
+                                    # 检测左手/右手 reach → grab → concealment 的完整时序
+                                    sequence_bonus = 0.0
+                                    seq_detected = False
+                                    bset = set(current_behaviors.keys())
+                                    # 右手序列
+                                    if "item_grabbing" in bset or "rapid_item_concealment" in bset or "item_concealment" in bset:
+                                        if "single_arm_hiding" in bset or "concealment_gesture" in bset or "body_shielding" in bset:
+                                            seq_detected = True
+                                    # 辅助判断：伸手 + 隐藏同时出现
+                                    if "reaching_motion" in bset and ("item_concealment" in bset or "rapid_item_concealment" in bset):
+                                        seq_detected = True
+                                    # 身体遮挡 + 可疑商品处理
+                                    if "body_shielding" in bset and ("suspicious_item_handling" in bset or "item_grabbing" in bset):
+                                        seq_detected = True
 
-                                        # 帧上标注行为 + 置信度
-                                        label = f"{cn_label}: {best_conf:.0%}"
-                                        label_color = (0, 0, 255) if best_conf >= BEHAVIOR_ALERT_THRESHOLD else (0, 165, 255)
-                                        cv2.putText(frame, label, (box[0], box[3] + 22),
-                                                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, label_color, 2)
+                                    if seq_detected:
+                                        sequence_bonus = 0.3  # 序列检测直接 +0.3
+                                        p_state.sequence_detected = True
+                                    p_state.sequence_bonus = sequence_bonus
 
-                                        # 列出所有检测到的可疑行为（调试用，帧上方小字）
-                                        if len(suspicious) > 1:
-                                            other_labels = " | ".join(
-                                                f"{behavior_detector.behavior_type_map.get(str(b.get('type','')), str(b.get('type','')))}:{c:.0%}"
-                                                for c, b in suspicious[1:4]
-                                            )
-                                            cv2.putText(frame, other_labels, (box[0], box[3] + 44),
-                                                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (128, 128, 128), 1)
+                                    # === 融合：最终偷盗概率 ===
+                                    # ML 模型不可用 → rule_prob × 0.7 + 连续性 + 序列
+                                    # ML 可用时改为 ml_prob × 0.6 + rule_prob × 0.4
+                                    theft_prob = (
+                                        p_state.rule_prob * 0.7          # 规则引擎贡献
+                                        + p_state.continuity_bonus       # 连续性加分
+                                        + p_state.sequence_bonus         # 序列加分
+                                    )
+                                    p_state.theft_probability = min(1.0, theft_prob)
 
-                                        # 首次越过阈值 → 该人只报警这一次
-                                        if (not p_state.alert_fired) and best_conf >= BEHAVIOR_ALERT_THRESHOLD:
-                                            alert_id = trigger_alert(
-                                                cam_id, name,
-                                                f"BEHAVIOR: {best_type} ({best_conf:.2f})",
-                                                frame,
-                                                confidence=best_conf,
-                                                behavior_type=best_type,
-                                                track_id=int(track_id)
-                                            )
-                                            p_state.alert_fired = True
-                                            p_state.alert_id = alert_id
-                                            cv2.rectangle(frame, (box[0], box[1]), (box[2], box[3]), (0, 0, 255), 3)
-                                        elif p_state.alert_fired and p_state.alert_id:
-                                            # 已报过警：不重复报警，只把更高峰值置信度回写到同一历史记录
-                                            update_alert_peak(p_state.alert_id, p_state.top_behavior, p_state.max_confidence)
+                                    # === 确定主行为（展示用） ===
+                                    top_btype = max(current_behaviors,
+                                                    key=lambda t: current_behaviors[t][0] * current_behaviors[t][1],
+                                                    default=None)
+                                    if top_btype:
+                                        p_state.top_behavior = top_btype
+                                    else:
+                                        top_btype = p_state.top_behavior
+
+                                    # 中文标签
+                                    cn_label = top_btype
+                                    if hasattr(behavior_detector, 'behavior_type_map') and top_btype:
+                                        cn_label = behavior_detector.behavior_type_map.get(top_btype, top_btype)
+
+                                    # 更新峰值
+                                    if p_state.theft_probability > p_state.max_confidence:
+                                        p_state.max_confidence = p_state.theft_probability
+
+                                    # === 帧上标注 ===
+                                    # 主标签：偷盗概率
+                                    label_color = (0, 0, 255) if p_state.theft_probability >= 0.5 else (0, 165, 255)
+                                    label = f"偷盗概率: {p_state.theft_probability:.0%}"
+                                    cv2.putText(frame, label, (box[0], box[3] + 22),
+                                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, label_color, 2)
+
+                                    # 参与计算的行为列表（小字）
+                                    if current_behaviors:
+                                        behavior_labels = " + ".join(
+                                            f"{behavior_detector.behavior_type_map.get(b, b) if hasattr(behavior_detector,'behavior_type_map') else b}:{c:.0%}"
+                                            for b, (c, w) in sorted(current_behaviors.items(),
+                                                                     key=lambda x: -x[1][0]*x[1][1])[:4]
+                                        )
+                                        cv2.putText(frame, behavior_labels, (box[0], box[3] + 44),
+                                                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (100, 100, 100), 1)
+
+                                    # === 最终判定：偷盗概率 ≥ 0.5 → is_theft = True ===
+                                    if (not p_state.alert_fired) and p_state.theft_probability >= 0.5:
+                                        alert_id = trigger_alert(
+                                            cam_id, name,
+                                            f"THEFT: {cn_label} | 概率={p_state.theft_probability:.2f} | "
+                                            f"rule={p_state.rule_prob:.2f} continuity={p_state.continuity_bonus:.2f} sequence={'Y' if p_state.sequence_detected else 'N'}",
+                                            frame,
+                                            confidence=p_state.theft_probability,
+                                            behavior_type=p_state.top_behavior,
+                                            track_id=int(track_id)
+                                        )
+                                        p_state.alert_fired = True
+                                        p_state.alert_id = alert_id
+                                        cv2.rectangle(frame, (box[0], box[1]), (box[2], box[3]), (0, 0, 255), 3)
+                                    elif p_state.alert_fired and p_state.alert_id:
+                                        update_alert_peak(p_state.alert_id, p_state.top_behavior, p_state.max_confidence)
                                 except Exception as e:
                                     print(f"VideoBehaviorDetector error (track {track_id}): {e}")
 

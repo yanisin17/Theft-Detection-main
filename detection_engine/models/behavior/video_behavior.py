@@ -1,4 +1,4 @@
-import os
+﻿import os
 import cv2
 import time
 import torch
@@ -742,9 +742,9 @@ class VideoBehaviorDetector:
             
             # 左手腕(15)和髋部中点的距离
             if 15 in landmarks and 23 in landmarks and 24 in landmarks:
-                left_wrist = (landmarks[15]['x'], landmarks[15]['y'])
-                left_hip = (landmarks[23]['x'], landmarks[23]['y'])
-                right_hip = (landmarks[24]['x'], landmarks[24]['y'])
+                left_wrist = (landmarks[15][0], landmarks[15][1])
+                left_hip = (landmarks[23][0], landmarks[23][1])
+                right_hip = (landmarks[24][0], landmarks[24][1])
                 hip_center = ((left_hip[0] + right_hip[0]) / 2, (left_hip[1] + right_hip[1]) / 2)
                 
                 left_wrist_dist = math.sqrt((left_wrist[0] - hip_center[0]) ** 2 + 
@@ -752,9 +752,9 @@ class VideoBehaviorDetector:
             
             # 右手腕(16)和髋部中点的距离
             if 16 in landmarks and 23 in landmarks and 24 in landmarks:
-                right_wrist = (landmarks[16]['x'], landmarks[16]['y'])
-                left_hip = (landmarks[23]['x'], landmarks[23]['y'])
-                right_hip = (landmarks[24]['x'], landmarks[24]['y'])
+                right_wrist = (landmarks[16][0], landmarks[16][1])
+                left_hip = (landmarks[23][0], landmarks[23][1])
+                right_hip = (landmarks[24][0], landmarks[24][1])
                 hip_center = ((left_hip[0] + right_hip[0]) / 2, (left_hip[1] + right_hip[1]) / 2)
                 
                 right_wrist_dist = math.sqrt((right_wrist[0] - hip_center[0]) ** 2 + 
@@ -767,7 +767,7 @@ class VideoBehaviorDetector:
             torso_height = 0
             if 11 in landmarks and 24 in landmarks:
                 # 使用右肩(11)和右髋(24)计算躯干高度
-                torso_height = abs(landmarks[11]['y'] - landmarks[24]['y'])
+                torso_height = abs(landmarks[11][1] - landmarks[24][1])
             
             features.append(torso_height)
             
@@ -777,9 +777,9 @@ class VideoBehaviorDetector:
             
             # 左手臂角度：使用左肩(11)、左肘(13)和左手腕(15)
             if 11 in landmarks and 13 in landmarks and 15 in landmarks:
-                shoulder = (landmarks[11]['x'], landmarks[11]['y'])
-                elbow = (landmarks[13]['x'], landmarks[13]['y'])
-                wrist = (landmarks[15]['x'], landmarks[15]['y'])
+                shoulder = (landmarks[11][0], landmarks[11][1])
+                elbow = (landmarks[13][0], landmarks[13][1])
+                wrist = (landmarks[15][0], landmarks[15][1])
                 
                 # 计算肩到肘的向量
                 se_vector = (elbow[0] - shoulder[0], elbow[1] - shoulder[1])
@@ -800,9 +800,9 @@ class VideoBehaviorDetector:
             
             # 右手臂角度：使用右肩(12)、右肘(14)和右手腕(16)
             if 12 in landmarks and 14 in landmarks and 16 in landmarks:
-                shoulder = (landmarks[12]['x'], landmarks[12]['y'])
-                elbow = (landmarks[14]['x'], landmarks[14]['y'])
-                wrist = (landmarks[16]['x'], landmarks[16]['y'])
+                shoulder = (landmarks[12][0], landmarks[12][1])
+                elbow = (landmarks[14][0], landmarks[14][1])
+                wrist = (landmarks[16][0], landmarks[16][1])
                 
                 # 计算肩到肘的向量
                 se_vector = (elbow[0] - shoulder[0], elbow[1] - shoulder[1])
@@ -830,9 +830,9 @@ class VideoBehaviorDetector:
             
             # 计算左手腕(15)和左髋(23)的比值
             if 15 in landmarks and 23 in landmarks and 24 in landmarks:
-                wrist_y = landmarks[15]['y']
-                left_hip_y = landmarks[23]['y']
-                right_hip_y = landmarks[24]['y']
+                wrist_y = landmarks[15][1]
+                left_hip_y = landmarks[23][1]
+                right_hip_y = landmarks[24][1]
                 hip_center_y = (left_hip_y + right_hip_y) / 2
                 
                 # 比例：手腕Y坐标与髋部中点的差值，除以躯干高度（如果有）
@@ -841,9 +841,9 @@ class VideoBehaviorDetector:
             
             # 计算右手腕(16)和右髋(24)的比值
             if 16 in landmarks and 23 in landmarks and 24 in landmarks:
-                wrist_y = landmarks[16]['y']
-                left_hip_y = landmarks[23]['y']
-                right_hip_y = landmarks[24]['y']
+                wrist_y = landmarks[16][1]
+                left_hip_y = landmarks[23][1]
+                right_hip_y = landmarks[24][1]
                 hip_center_y = (left_hip_y + right_hip_y) / 2
                 
                 # 比例：手腕Y坐标与髋部中点的差值，除以躯干高度（如果有）
@@ -856,10 +856,10 @@ class VideoBehaviorDetector:
             # 5. 计算手臂交叉状态
             arms_crossed = 0
             if 13 in landmarks and 14 in landmarks and 15 in landmarks and 16 in landmarks:
-                left_elbow_x = landmarks[13]['x']
-                right_elbow_x = landmarks[14]['x']
-                left_wrist_x = landmarks[15]['x']
-                right_wrist_x = landmarks[16]['x']
+                left_elbow_x = landmarks[13][0]
+                right_elbow_x = landmarks[14][0]
+                left_wrist_x = landmarks[15][0]
+                right_wrist_x = landmarks[16][0]
                 
                 # 判断手臂是否交叉
                 # 交叉条件：左手腕在右手肘的右侧，或右手腕在左手肘的左侧
@@ -872,11 +872,11 @@ class VideoBehaviorDetector:
             torso_rotation = 0
             if 11 in landmarks and 12 in landmarks and 23 in landmarks and 24 in landmarks:
                 # 计算肩膀线的角度
-                shoulder_angle = math.atan2(landmarks[12]['y'] - landmarks[11]['y'], 
-                                           landmarks[12]['x'] - landmarks[11]['x'])
+                shoulder_angle = math.atan2(landmarks[12][1] - landmarks[11][1], 
+                                           landmarks[12][0] - landmarks[11][0])
                 # 计算髋部线的角度
-                hip_angle = math.atan2(landmarks[24]['y'] - landmarks[23]['y'], 
-                                      landmarks[24]['x'] - landmarks[23]['x'])
+                hip_angle = math.atan2(landmarks[24][1] - landmarks[23][1], 
+                                      landmarks[24][0] - landmarks[23][0])
                 # 两条线之间的角度差异（弧度）
                 angle_diff = abs(shoulder_angle - hip_angle)
                 # 转换为角度
@@ -888,8 +888,8 @@ class VideoBehaviorDetector:
             shoulder_width = 0
             if 11 in landmarks and 12 in landmarks:
                 # 计算肩膀宽度
-                shoulder_width = math.sqrt((landmarks[12]['x'] - landmarks[11]['x'])**2 + 
-                                          (landmarks[12]['y'] - landmarks[11]['y'])**2)
+                shoulder_width = math.sqrt((landmarks[12][0] - landmarks[11][0])**2 + 
+                                          (landmarks[12][1] - landmarks[11][1])**2)
             
             features.append(shoulder_width)
             
@@ -897,8 +897,8 @@ class VideoBehaviorDetector:
             head_position = 0
             if 0 in landmarks and 11 in landmarks and 12 in landmarks:
                 # 头部(0)相对于肩膀中点的位置
-                shoulder_center_x = (landmarks[11]['x'] + landmarks[12]['x']) / 2
-                head_x = landmarks[0]['x']
+                shoulder_center_x = (landmarks[11][0] + landmarks[12][0]) / 2
+                head_x = landmarks[0][0]
                 # 头部水平偏移
                 head_position = head_x - shoulder_center_x
             
@@ -908,8 +908,8 @@ class VideoBehaviorDetector:
             knee_hip_ratio = 0
             if 25 in landmarks and 26 in landmarks and 23 in landmarks and 24 in landmarks:
                 # 计算膝盖中点和胯部中点的位置
-                knee_center_y = (landmarks[25]['y'] + landmarks[26]['y']) / 2
-                hip_center_y = (landmarks[23]['y'] + landmarks[24]['y']) / 2
+                knee_center_y = (landmarks[25][1] + landmarks[26][1]) / 2
+                hip_center_y = (landmarks[23][1] + landmarks[24][1]) / 2
                 # 膝盖与胯部的距离
                 knee_hip_distance = abs(knee_center_y - hip_center_y)
                 # 与躯干高度的比例
@@ -958,16 +958,16 @@ class VideoBehaviorDetector:
             right_wrist_movement = 0.0
             
             if 15 in landmarks and 15 in prev_landmarks:
-                left_wrist_curr = (landmarks[15]['x'], landmarks[15]['y'])
-                left_wrist_prev = (prev_landmarks[15]['x'], prev_landmarks[15]['y'])
+                left_wrist_curr = (landmarks[15][0], landmarks[15][1])
+                left_wrist_prev = (prev_landmarks[15][0], prev_landmarks[15][1])
                 left_wrist_movement = math.sqrt(
                     (left_wrist_curr[0] - left_wrist_prev[0])**2 + 
                     (left_wrist_curr[1] - left_wrist_prev[1])**2
                 )
             
             if 16 in landmarks and 16 in prev_landmarks:
-                right_wrist_curr = (landmarks[16]['x'], landmarks[16]['y'])
-                right_wrist_prev = (prev_landmarks[16]['x'], prev_landmarks[16]['y'])
+                right_wrist_curr = (landmarks[16][0], landmarks[16][1])
+                right_wrist_prev = (prev_landmarks[16][0], prev_landmarks[16][1])
                 right_wrist_movement = math.sqrt(
                     (right_wrist_curr[0] - right_wrist_prev[0])**2 + 
                     (right_wrist_curr[1] - right_wrist_prev[1])**2
@@ -981,14 +981,14 @@ class VideoBehaviorDetector:
             # 计算躯干旋转 - 使用肩膀和髋部的相对位置
             if all(i in landmarks and i in prev_landmarks for i in [11, 12, 23, 24]):
                 # 当前帧肩膀中心位置
-                curr_shoulder_center_x = (landmarks[11]['x'] + landmarks[12]['x']) / 2
+                curr_shoulder_center_x = (landmarks[11][0] + landmarks[12][0]) / 2
                 # 前一帧肩膀中心位置
-                prev_shoulder_center_x = (prev_landmarks[11]['x'] + prev_landmarks[12]['x']) / 2
+                prev_shoulder_center_x = (prev_landmarks[11][0] + prev_landmarks[12][0]) / 2
                 
                 # 当前帧髋部中心点位置
-                curr_hip_center_x = (landmarks[23]['x'] + landmarks[24]['x']) / 2
+                curr_hip_center_x = (landmarks[23][0] + landmarks[24][0]) / 2
                 # 前一帧髋部中心点位置
-                prev_hip_center_x = (prev_landmarks[23]['x'] + prev_landmarks[24]['x']) / 2
+                prev_hip_center_x = (prev_landmarks[23][0] + prev_landmarks[24][0]) / 2
                 
                 # 计算旋转变化
                 curr_rotation = curr_shoulder_center_x - curr_hip_center_x
@@ -1000,8 +1000,8 @@ class VideoBehaviorDetector:
             # 3. 头部移动
             head_movement = 0.0
             if 0 in landmarks and 0 in prev_landmarks:
-                head_curr = (landmarks[0]['x'], landmarks[0]['y'])
-                head_prev = (prev_landmarks[0]['x'], prev_landmarks[0]['y'])
+                head_curr = (landmarks[0][0], landmarks[0][1])
+                head_prev = (prev_landmarks[0][0], prev_landmarks[0][1])
                 head_movement = math.sqrt(
                     (head_curr[0] - head_prev[0])**2 + 
                     (head_curr[1] - head_prev[1])**2
@@ -1012,8 +1012,8 @@ class VideoBehaviorDetector:
             # 4. 肩膀宽度变化
             shoulder_width_change = 0.0
             if 11 in landmarks and 12 in landmarks and 11 in prev_landmarks and 12 in prev_landmarks:
-                curr_shoulder_width = abs(landmarks[11]['x'] - landmarks[12]['x'])
-                prev_shoulder_width = abs(prev_landmarks[11]['x'] - prev_landmarks[12]['x'])
+                curr_shoulder_width = abs(landmarks[11][0] - landmarks[12][0])
+                prev_shoulder_width = abs(prev_landmarks[11][0] - prev_landmarks[12][0])
                 shoulder_width_change = abs(curr_shoulder_width - prev_shoulder_width)
             
             dynamic_features.append(shoulder_width_change)
@@ -1022,8 +1022,8 @@ class VideoBehaviorDetector:
             torso_height_change = 0.0
             if 11 in landmarks and 24 in landmarks and 11 in prev_landmarks and 24 in prev_landmarks:
                 # 使用右肩(11)和右髋(24)计算躯干高度
-                curr_torso_height = abs(landmarks[11]['y'] - landmarks[24]['y'])
-                prev_torso_height = abs(prev_landmarks[11]['y'] - prev_landmarks[24]['y'])
+                curr_torso_height = abs(landmarks[11][1] - landmarks[24][1])
+                prev_torso_height = abs(prev_landmarks[11][1] - prev_landmarks[24][1])
                 torso_height_change = abs(curr_torso_height - prev_torso_height)
             
             dynamic_features.append(torso_height_change)
@@ -1977,18 +1977,19 @@ class VideoBehaviorDetector:
         """把 _extract_pose_landmarks 返回的 landmarks list 转换成 dict with integer keys
         
         输入: [[x, y, visibility], ...]  (MediaPipe 33点)
-        输出: {0: {'x': x, 'y': y, 'visibility': vis}, 1: {...}, ...}
+        输出: {0: [x, y, visibility], 1: [x, y, visibility], ...}
         
-        下游方法 (_extract_standard_features, _detect_pose_based_behaviors) 期望 dict 格式。
+        注意: 值用 list 格式 [x, y, vis]，不是 dict {'x':..., 'y':...}
+        因为子检测器 (_detect_abnormal_arm_positions 等) 用 a[0], a[1] 索引访问
         """
         if landmarks_list is None:
             return None
         result = {}
         for i, pt in enumerate(landmarks_list):
             if len(pt) >= 3:
-                result[i] = {'x': float(pt[0]), 'y': float(pt[1]), 'visibility': float(pt[2])}
+                result[i] = [float(pt[0]), float(pt[1]), float(pt[2])]
             elif len(pt) >= 2:
-                result[i] = {'x': float(pt[0]), 'y': float(pt[1]), 'visibility': 0.5}
+                result[i] = [float(pt[0]), float(pt[1]), 0.5]
         return result
     
     def _draw_pose_landmarks(self, image, pose_results):
@@ -2122,40 +2123,40 @@ class VideoBehaviorDetector:
         # 检测异常手臂位置
         arm_behavior = self._detect_abnormal_arm_positions(image, landmarks, person_bbox, person_id)
         if arm_behavior:
-            behaviors.append(arm_behavior)
+            behaviors.extend(arm_behavior)
         
         # 检测可疑蹲姿
         crouch_behavior = self._detect_suspicious_crouching(image, landmarks, person_bbox)
         if crouch_behavior:
-            behaviors.append(crouch_behavior)
+            behaviors.extend(crouch_behavior)
         
         # 检测不自然伸手姿势
         if object_detections:
             reach_behavior = self._detect_unusual_reaching(image, landmarks, person_bbox, object_detections)
             if reach_behavior:
-                behaviors.append(reach_behavior)
+                behaviors.extend(reach_behavior)
             
         # 检测身体屏蔽姿势
         if object_detections:
             shield_behavior = self._detect_body_shielding(image, landmarks, person_bbox, object_detections)
             if shield_behavior:
-                behaviors.append(shield_behavior)
+                behaviors.extend(shield_behavior)
         
         # 检测头部异常转动
         head_behavior = self._detect_abnormal_head_movement(image, landmarks, person_bbox)
         if head_behavior:
-            behaviors.append(head_behavior)
+            behaviors.extend(head_behavior)
         
         # 检测双手背后姿势
         hands_behind_behavior = self._detect_hands_behind_back(image, landmarks, person_bbox)
         if hands_behind_behavior:
-            behaviors.append(hands_behind_behavior)
+            behaviors.extend(hands_behind_behavior)
             
         # 检测分散注意力行为
         if person_id is not None:
             distraction_behavior = self._detect_distraction_behavior(image, landmarks, person_bbox, person_id)
             if distraction_behavior:
-                behaviors.append(distraction_behavior)
+                behaviors.extend(distraction_behavior)
                 
         # 记录该人的行为历史
         if person_id is not None and behaviors:
@@ -2182,9 +2183,9 @@ class VideoBehaviorDetector:
             return None
             
         # 获取左右手腕位置和移动
-        left_wrist = (landmarks[15]['x'], landmarks[15]['y'])
-        right_wrist = (landmarks[16]['x'], landmarks[16]['y'])
-        head = (landmarks[0]['x'], landmarks[0]['y'])
+        left_wrist = (landmarks[15][0], landmarks[15][1])
+        right_wrist = (landmarks[16][0], landmarks[16][1])
+        head = (landmarks[0][0], landmarks[0][1])
         
         # 获取前一帧的关键点记录
         prev_landmarks = None
@@ -2199,8 +2200,8 @@ class VideoBehaviorDetector:
             
         # 计算手腕移动
         try:
-            prev_left_wrist = (prev_landmarks[15]['x'], prev_landmarks[15]['y'])
-            prev_right_wrist = (prev_landmarks[16]['x'], prev_landmarks[16]['y'])
+            prev_left_wrist = (prev_landmarks[15][0], prev_landmarks[15][1])
+            prev_right_wrist = (prev_landmarks[16][0], prev_landmarks[16][1])
             
             # 计算左右手腕位移
             left_movement = np.sqrt((left_wrist[0] - prev_left_wrist[0])**2 + 
