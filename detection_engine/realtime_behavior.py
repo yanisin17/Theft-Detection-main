@@ -28,20 +28,16 @@ import math
 import cv2
 import numpy as np
 
+from detection_engine import detector_config
+
 # MediaPipe Pose 33 关键点索引
 _L_SHOULDER, _R_SHOULDER = 11, 12
 _L_ELBOW, _R_ELBOW = 13, 14
 _L_WRIST, _R_WRIST = 15, 16
 _L_HIP, _R_HIP = 23, 24
 
-# 判定阈值（均基于归一化坐标 / 身体比例，分辨率无关）
-_VIS_MIN = 0.35          # 关键点可见度下限
-_OUT_HITS_TO_REACH = 2   # 连续多少次“探出”判定才进入 reaching 阶段
-_REACH_DOWN_BELOW_HIP = 0.03    # 手腕低于髋部多少算向下探
-_REACH_OUT_SIDE_RATIO = 1.05    # 手腕水平距身体中轴 > 肩宽*该系数 算向外探
-_ARM_EXTENDED_ANGLE = 150       # 手臂伸直角度
-_RETREAT_MIN = 0.14      # 从最远点回缩到躯干的最小归一化距离
-_REACH_TIMEOUT = 3.0     # 探出后超过该秒数未回缩则放弃该序列
+# 判定阈值的默认值统一收在 detector_config.py(可被 detector_tuning.json
+# 或构造函数参数覆盖),此处仅保留索引常量。
 
 
 class _TrackState:
@@ -69,25 +65,52 @@ class _TrackState:
 class RealtimeBehaviorDetector:
     """对单个人物裁剪图做 MediaPipe 33 点分析，返回当前周期最强行为事件。"""
 
-    def __init__(self, min_detection_confidence=0.4):
+    def __init__(self, min_detection_confidence=None, model_complexity=None,
+                 vis_min=None, out_hits_to_reach=None, retreat_min=None,
+                 reach_timeout=None, reach_down_below_hip=None,
+                 reach_out_side_ratio=None, reach_arm_angle_min=None,
+                 clock=None):
+        """
+        所有参数不传时取 detector_config 的当前值;显式传参用于网格搜索/评估。
+        clock: 返回秒数的可调用对象,默认 time.time;离线回放评估时传视频时间,
+               否则以快于实时的速度回放会让 _REACH_TIMEOUT 等超时逻辑失真。
+        """
+        cfg = detector_config
+        self.vis_min = cfg.VIS_MIN if vis_min is None else vis_min
+        self.out_hits_to_reach = (cfg.OUT_HITS_TO_REACH if out_hits_to_reach is None
+                                  else out_hits_to_reach)
+        self.retreat_min = cfg.RETREAT_MIN if retreat_min is None else retreat_min
+        self.reach_timeout = cfg.REACH_TIMEOUT if reach_timeout is None else reach_timeout
+        self.reach_down_below_hip = (cfg.REACH_DOWN_BELOW_HIP if reach_down_below_hip is None
+                                     else reach_down_below_hip)
+        self.reach_out_side_ratio = (cfg.REACH_OUT_SIDE_RATIO if reach_out_side_ratio is None
+                                     else reach_out_side_ratio)
+        self.reach_arm_angle_min = (cfg.REACH_ARM_ANGLE_MIN if reach_arm_angle_min is None
+                                    else reach_arm_angle_min)
+        self._clock = clock or time.time
+
         self._mp_pose = None
         self.pose = None
         self._states = {}          # track_key -> _TrackState
-        self._init_pose(min_detection_confidence)
+        if min_detection_confidence is None:
+            min_detection_confidence = cfg.MEDIAPIPE_MIN_DETECTION_CONFIDENCE
+        if model_complexity is None:
+            model_complexity = cfg.MEDIAPIPE_MODEL_COMPLEXITY
+        self._init_pose(min_detection_confidence, model_complexity)
 
-    def _init_pose(self, min_det):
+    def _init_pose(self, min_det, model_complexity):
         try:
             import mediapipe as mp
             self._mp_pose = mp.solutions.pose
-            # 逐人裁剪图 + 自带状态机，使用静态图模式；complexity=0 保证实时性能
+            # 逐人裁剪图 + 自带状态机，使用静态图模式；complexity 可调(0快/1准)
             self.pose = self._mp_pose.Pose(
                 static_image_mode=True,
-                model_complexity=0,
+                model_complexity=model_complexity,
                 enable_segmentation=False,
                 min_detection_confidence=min_det,
                 min_tracking_confidence=0.4,
             )
-            print("RealtimeBehaviorDetector: MediaPipe Pose (33pt) ready.")
+            print(f"RealtimeBehaviorDetector: MediaPipe Pose (33pt, complexity={model_complexity}) ready.")
         except Exception as e:
             self.pose = None
             print(f"RealtimeBehaviorDetector init failed: {e}")
@@ -117,7 +140,7 @@ class RealtimeBehaviorDetector:
         hip, hipr = lm[ihip], lm[ihipr]
 
         # 可见度过滤
-        if sh[2] < _VIS_MIN or el[2] < _VIS_MIN or wr[2] < _VIS_MIN or hip[2] < _VIS_MIN:
+        if sh[2] < self.vis_min or el[2] < self.vis_min or wr[2] < self.vis_min or hip[2] < self.vis_min:
             return None
 
         smx, smy = (sh[0] + shr[0]) / 2.0, (sh[1] + shr[1]) / 2.0
@@ -129,8 +152,8 @@ class RealtimeBehaviorDetector:
         arm_ang = self._angle((sh[0], sh[1]), (el[0], el[1]), (wx, wy))
 
         # 1) 手探出：向下（低于髋）或向外（水平离开身体且手臂较直）
-        reach_down = wy > hmy + _REACH_DOWN_BELOW_HIP
-        reach_out = abs(wx - smx) > _REACH_OUT_SIDE_RATIO * tw and arm_ang > 120
+        reach_down = wy > hmy + self.reach_down_below_hip
+        reach_out = abs(wx - smx) > self.reach_out_side_ratio * tw and arm_ang > self.reach_arm_angle_min
         reaching = reach_down or reach_out
 
         # 2) 手回缩到躯干 / 腰腹 / 胯部区域（藏匿位置）
@@ -148,35 +171,50 @@ class RealtimeBehaviorDetector:
             "arm_ang": arm_ang,
         }
 
-    def analyze(self, person_bgr, track_key):
+    def extract_landmarks(self, person_bgr):
         """
-        分析单个人物裁剪图。
+        跑 MediaPipe Pose,返回 {索引: (x, y, visibility)} 或 None。
+        拆出这一步是为了离线评估/网格搜索:关键点推理与阈值无关,可缓存后
+        用不同参数反复重放状态机(step),避免重复做昂贵的推理。
+        """
+        if self.pose is None or person_bgr is None or person_bgr.size == 0:
+            return None
+        try:
+            rgb = cv2.cvtColor(person_bgr, cv2.COLOR_BGR2RGB)
+            res = self.pose.process(rgb)
+        except Exception:
+            return None
+        if not res.pose_landmarks:
+            return None
+        pts = res.pose_landmarks.landmark
+        return {i: (p.x, p.y, float(p.visibility)) for i, p in enumerate(pts)}
+
+    def analyze(self, person_bgr, track_key):
+        """提取关键点 + 推进状态机(在线实时路径的便捷入口)。"""
+        lm = self.extract_landmarks(person_bgr)
+        return self.step(lm, track_key)
+
+    def step(self, lm, track_key, now=None):
+        """
+        纯状态机:给定关键点 lm(extract_landmarks 的输出,可为 None)推进一个
+        周期,返回事件或 None。now 用于注入时间(离线回放传视频时间)。
 
         Returns:
             None
             或 {"type": str, "confidence": float, "phase": str}
             type ∈ {"Taking Object"(提示,低置信), "Rapid Item Concealment"(报警级)}
         """
-        if self.pose is None or person_bgr is None or person_bgr.size == 0:
-            return None
+        if now is None:
+            now = self._clock()
 
         st = self._states.get(track_key)
         if st is None:
             st = _TrackState()
             self._states[track_key] = st
-        st.last_seen = time.time()
+        st.last_seen = now
 
-        try:
-            rgb = cv2.cvtColor(person_bgr, cv2.COLOR_BGR2RGB)
-            res = self.pose.process(rgb)
-        except Exception:
+        if lm is None:
             return None
-
-        if not res.pose_landmarks:
-            return None
-
-        pts = res.pose_landmarks.landmark
-        lm = {i: (p.x, p.y, float(p.visibility)) for i, p in enumerate(pts)}
 
         sig_l = self._hand_signals(lm, "L")
         sig_r = self._hand_signals(lm, "R")
@@ -184,7 +222,6 @@ class RealtimeBehaviorDetector:
         if not sigs:
             return None
 
-        now = time.time()
         # 主导手：探出阶段取“更靠外/靠下”的手，藏匿阶段取“在藏匿区”的手
         reaching_sig = max(sigs, key=lambda s: (s["reaching"], s["w"][1], abs(s["w"][0] - 0.5)))
         conceal_sig = next((s for s in sigs if s["conceal_zone"]), None)
@@ -198,7 +235,7 @@ class RealtimeBehaviorDetector:
                 # 伸手拿取的中间提示（低于报警阈值，仅画面标注）
                 st.taking_hits += 1
                 st.taking_conf = min(0.45 + 0.05 * st.taking_hits, 0.65)
-                if st.out_hits >= _OUT_HITS_TO_REACH:
+                if st.out_hits >= self.out_hits_to_reach:
                     st.phase = "reaching"
                 return {"type": "Taking Object", "confidence": st.taking_conf, "phase": "reach"}
             else:
@@ -223,19 +260,19 @@ class RealtimeBehaviorDetector:
             if conceal_sig is not None and st.far is not None:
                 retreat = math.hypot(conceal_sig["w"][0] - st.far[0],
                                      conceal_sig["w"][1] - st.far[1])
-                if retreat >= _RETREAT_MIN:
+                if retreat >= self.retreat_min:
                     # 完成 “探出拿取 → 回缩藏匿” 序列
                     # 置信度：基于回缩距离相对于阈值的超额倍数 + 藏匿位置 + 探出猛烈度
                     # 预期分布：正常 0.72~0.85，典型 0.80~0.92，极端 0.93~0.96
-                    excess = max(0.0, retreat - _RETREAT_MIN)  # 超出阈值的部分
-                    excess_ratio = min(1.0, excess / _RETREAT_MIN)  # 0~1
+                    excess = max(0.0, retreat - self.retreat_min)  # 超出阈值的部分
+                    excess_ratio = min(1.0, excess / self.retreat_min)  # 0~1
                     base = 0.72 + excess_ratio * 0.18  # 0.72~0.90
 
                     # 藏匿位置加成：胯部/裤袋(+0.05) > 躯干藏匿(+0.02)
                     pos_bonus = 0.05 if conceal_sig["on_hip_bag"] else (0.02 if conceal_sig["conceal_zone"] else 0.0)
 
                     # 探出猛烈度加成：手臂伸直角度越大 = 探出越果决
-                    reach_fierce = max(0.0, (reaching_sig.get("arm_ang", 180) - 120) / 60)  # 0~1
+                    reach_fierce = max(0.0, (reaching_sig.get("arm_ang", 180) - self.reach_arm_angle_min) / 60)  # 0~1
                     fierce_bonus = reach_fierce * 0.04
 
                     conf = float(max(0.72, min(0.96, base + pos_bonus + fierce_bonus)))
@@ -243,7 +280,7 @@ class RealtimeBehaviorDetector:
                     return {"type": "Rapid Item Concealment", "confidence": conf,
                             "phase": "conceal"}
 
-            if now - st.reach_t0 > _REACH_TIMEOUT:
+            if now - st.reach_t0 > self.reach_timeout:
                 st.reset()
             return None
 
@@ -251,7 +288,7 @@ class RealtimeBehaviorDetector:
 
     def prune(self, max_age_seconds=20.0):
         """清理长期消失的 track 状态"""
-        now = time.time()
+        now = self._clock()
         dead = [k for k, s in self._states.items() if now - s.last_seen > max_age_seconds]
         for k in dead:
             self._states.pop(k, None)

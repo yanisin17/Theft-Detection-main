@@ -20,6 +20,9 @@ _PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
+from detection_engine.alert_policy import should_run_aggregate_detector, should_trigger_theft_alert
+from detection_engine import detector_config
+
 BEHAVIOR_ENGINE_AVAILABLE = False
 try:
     from detection_engine.models.behavior.video_behavior import VideoBehaviorDetector
@@ -396,6 +399,22 @@ async def stream_evidence(alert_id: str):
         media_type="multipart/x-mixed-replace; boundary=frame"
     )
 
+def _find_evidence_mp4(image_path):
+    """根据告警截图文件名 alert_{cam_id}_{ts}.jpg 定位对应的归档 mp4。
+
+    归档 mp4 由 _encode_evidence_video 生成，命名 evidence_{cam_id}_{ts}.mp4，
+    其中 cam_id/ts 与同一告警的截图文件名完全一致。
+    解析失败或文件不存在时返回 None——宁可不删，也不能误删其他告警的证据。
+    """
+    try:
+        stem = os.path.splitext(os.path.basename(image_path))[0]
+        # cam_id 是 UUID（不含下划线），ts 形如 20260915_164734（含下划线）
+        _, cam_id, ts = stem.split("_", 2)
+        mp4_path = os.path.join(EVIDENCE_DIR, f"evidence_{cam_id}_{ts}.mp4")
+        return mp4_path if os.path.exists(mp4_path) else None
+    except Exception:
+        return None
+
 @app.delete("/history/{alert_id}")
 async def delete_alert(alert_id: str):
     """删除指定告警记录（同时清理图片、视频帧目录、归档 mp4）"""
@@ -430,12 +449,12 @@ async def delete_alert(alert_id: str):
                     try: shutil.rmtree(p); break
                     except Exception: pass
 
-        # 删归档 mp4（同名 alert_id 前8位匹配）
-        if video_path:
-            for fname in os.listdir(EVIDENCE_DIR):
-                if fname.endswith(".mp4"):
-                    try: os.remove(os.path.join(EVIDENCE_DIR, fname))
-                    except Exception: pass
+        # 删归档 mp4：只删与该告警同刻生成的 evidence_{cam_id}_{ts}.mp4，
+        # 不允许全目录遍历删除（否则会清空所有告警的证据视频）
+        mp4_path = _find_evidence_mp4(image_path)
+        if mp4_path:
+            try: os.remove(mp4_path)
+            except Exception: pass
 
         return {"message": "告警记录已删除"}
     except HTTPException:
@@ -518,7 +537,9 @@ class ThreadedCamera:
 class CameraManager:
     def __init__(self):
         self.cameras = {}
-        self.lock = threading.Lock()
+        # 可重入锁：save_cameras() 内部也会获取 self.lock，
+        # 若调用方持锁调用会死锁（threading.Lock 不可重入）
+        self.lock = threading.RLock()
         self.load_cameras()
 
     def load_cameras(self):
@@ -686,11 +707,16 @@ async def delete_camera(camera_id: str):
 async def save_camera_roi(camera_id: str, data: dict):
     if "points" in data:
         points = data["points"]
+        found = False
         with camera_manager.lock:
             if camera_id in camera_manager.cameras:
                 camera_manager.cameras[camera_id]["roi_points"] = points
-                camera_manager.save_cameras()
-                return {"status": "success", "roi_points": points}
+                found = True
+        if found:
+            # 锁外落盘：save_cameras() 内部会再次获取同一把锁，
+            # 即使是 RLock，也避免在持锁期间做文件 IO
+            camera_manager.save_cameras()
+            return {"status": "success", "roi_points": points}
         raise HTTPException(status_code=404, detail="Camera not found")
     raise HTTPException(status_code=400, detail="Invalid data")
 
@@ -783,6 +809,8 @@ class PersonState:
         self.theft_probability = 0.0    # 最终偷盗概率
         self.sequence_detected = False  # 是否检测到抓取→隐藏完整序列
         self.grab_phase = None          # 'left'/'right'，用于序列检测
+        # --- 佐证确认：单次藏匿事件先挂起，窗口内二次事件或手中持物才报警 ---
+        self.conceal_event_times = []   # 报警级藏匿事件的时间戳列表（自动裁剪窗口外旧事件）
         # 其它报警类型也按人去重
         self.blacklist_alert_fired = False
         self.roi_alert_fired = False
@@ -1093,7 +1121,80 @@ def video_loop():
                             run_behavior = (behavior_detector is not None) and (
                                 frame_count % BEHAVIOR_CHECK_INTERVAL == 0 or is_bending
                             )
-                            if run_behavior:
+                            realtime_confirmed = False
+
+                            if realtime_detector is not None and frame_count % BEHAVIOR_CHECK_INTERVAL == 0:
+                                try:
+                                    pad = 60
+                                    sx1 = max(0, box[0] - pad)
+                                    sy1 = max(0, box[1] - pad)
+                                    sx2 = min(frame.shape[1], box[2] + pad)
+                                    sy2 = min(frame.shape[0], box[3] + pad)
+                                    person_frame = frame[sy1:sy2, sx1:sx2].copy()
+                                    realtime_event = realtime_detector.analyze(
+                                        person_frame, f'{cam_id}:{int(track_id)}'
+                                    )
+
+                                    if realtime_event is not None:
+                                        event_type = realtime_event.get('type', '')
+                                        event_confidence = float(realtime_event.get('confidence', 0.0))
+                                        event_alertable = should_trigger_theft_alert(
+                                            event_type, event_confidence, sequence_confirmed=True
+                                        )
+                                        event_color = (0, 0, 255) if event_alertable else (0, 165, 255)
+                                        cv2.putText(
+                                            frame, f'{event_type}: {event_confidence:.0%}',
+                                            (box[0], box[3] + 66), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                                            event_color, 2
+                                        )
+
+                                        if event_alertable:
+                                            realtime_confirmed = True
+                                            p_state.theft_probability = max(
+                                                p_state.theft_probability, event_confidence
+                                            )
+                                            p_state.top_behavior = 'rapid_item_concealment'
+                                            if event_confidence > p_state.max_confidence:
+                                                p_state.max_confidence = event_confidence
+
+                                            # --- 佐证确认：单次藏匿事件先挂起 ---
+                                            # 窗口内第二次藏匿事件 或 藏匿时手中持有物品 才真正报警；
+                                            # REQUIRE_CORROBORATION=False 时保持旧行为(单次即报)
+                                            p_state.conceal_event_times.append(current_time)
+                                            p_state.conceal_event_times = [
+                                                t for t in p_state.conceal_event_times
+                                                if current_time - t <= detector_config.CORROBORATION_WINDOW
+                                            ]
+                                            corroborated = (
+                                                not detector_config.REQUIRE_CORROBORATION
+                                                or len(p_state.conceal_event_times) >= 2
+                                                or p_state.holding_object
+                                            )
+
+                                            if corroborated and not p_state.alert_fired:
+                                                corr_source = 'holding' if p_state.holding_object else 'repeat'
+                                                alert_id = trigger_alert(
+                                                    cam_id, name,
+                                                    f'THEFT: Rapid Item Concealment | probability={event_confidence:.2f} | sequence=Y | corroborated={corr_source}',
+                                                    frame, confidence=event_confidence,
+                                                    behavior_type='rapid_item_concealment',
+                                                    track_id=int(track_id)
+                                                )
+                                                p_state.alert_fired = True
+                                                p_state.alert_id = alert_id
+                                                cv2.rectangle(frame, (box[0], box[1]), (box[2], box[3]), (0, 0, 255), 3)
+                                            elif corroborated and p_state.alert_id:
+                                                update_alert_peak(
+                                                    p_state.alert_id, p_state.top_behavior, p_state.max_confidence
+                                                )
+                                            elif not p_state.alert_fired:
+                                                # 已达报警级但缺佐证：橙色挂起提示，等窗口内二次事件
+                                                cv2.putText(frame, 'PENDING CONFIRM (concealment)',
+                                                            (box[0], box[3] + 88), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                                                            (0, 165, 255), 2)
+                                except Exception as e:
+                                    print(f'RealtimeBehaviorDetector error (track {track_id}): {e}')
+                            if run_behavior and should_run_aggregate_detector(realtime_confirmed):
                                 try:
                                     pad = 60
                                     sx1 = max(0, box[0] - pad)
@@ -1191,8 +1292,15 @@ def video_loop():
                                         p_state.max_confidence = p_state.theft_probability
 
                                     # === 帧上标注 ===
+                                    # 聚合引擎的序列检测命中(抓取→藏匿组合)时，行为语义等同于
+                                    # rapid_item_concealment，作为实时状态机之外的兜底报警通路
+                                    agg_behavior = ('rapid_item_concealment'
+                                                    if p_state.sequence_detected else p_state.top_behavior)
                                     # 主标签：偷盗概率
-                                    label_color = (0, 0, 255) if p_state.theft_probability >= 0.5 else (0, 165, 255)
+                                    label_color = (0, 0, 255) if should_trigger_theft_alert(
+                                        agg_behavior, p_state.theft_probability,
+                                        sequence_confirmed=p_state.sequence_detected
+                                    ) else (0, 165, 255)
                                     label = f"偷盗概率: {p_state.theft_probability:.0%}"
                                     cv2.putText(frame, label, (box[0], box[3] + 22),
                                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, label_color, 2)
@@ -1207,8 +1315,12 @@ def video_loop():
                                         cv2.putText(frame, behavior_labels, (box[0], box[3] + 44),
                                                     cv2.FONT_HERSHEY_SIMPLEX, 0.35, (100, 100, 100), 1)
 
-                                    # === 最终判定：偷盗概率 ≥ 0.5 → is_theft = True ===
-                                    if (not p_state.alert_fired) and p_state.theft_probability >= 0.5:
+                                    # === 最终判定：序列确认 + 偷盗概率达标 → 报警 ===
+                                    # (序列检测本身已要求"抓取→藏匿"两类行为同时出现，自带佐证语义)
+                                    if (not p_state.alert_fired) and should_trigger_theft_alert(
+                                        agg_behavior, p_state.theft_probability,
+                                        sequence_confirmed=p_state.sequence_detected
+                                    ):
                                         alert_id = trigger_alert(
                                             cam_id, name,
                                             f"THEFT: {cn_label} | 概率={p_state.theft_probability:.2f} | "
