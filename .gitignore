@@ -24,6 +24,10 @@ dashboard/.next/
 Thumbs.db
 .DS_Store
 
+# Secrets / local config (contains camera credentials)
+.env
+cameras.json
+
 # Runtime generated (snapshots, evidence videos, logs, DB)
 alerts/
 evidence_videos/

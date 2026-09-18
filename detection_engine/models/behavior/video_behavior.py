@@ -2437,16 +2437,18 @@ class VideoBehaviorDetector:
         behaviors = []
         
         try:
-            if not landmarks or len(landmarks) < 11:  # 至少需要包含肩膀和手腕的关键点
+            if not landmarks or len(landmarks) < 17:  # 至少需要包含肩膀和手腕的关键点(MediaPipe 11~16)
                 return behaviors
             
             # 获取身体关键点
-            left_shoulder = landmarks[5] if len(landmarks) > 5 else None
-            right_shoulder = landmarks[6] if len(landmarks) > 6 else None
-            left_elbow = landmarks[7] if len(landmarks) > 7 else None
-            right_elbow = landmarks[8] if len(landmarks) > 8 else None
-            left_wrist = landmarks[9] if len(landmarks) > 9 else None
-            right_wrist = landmarks[10] if len(landmarks) > 10 else None
+            # MediaPipe 33点索引：肩 11/12，肘 13/14，腕 15/16
+            # （原代码按 COCO 17点索引 5~10 访问，读到的是嘴/眼睛位置，行为判断完全错位）
+            left_shoulder = landmarks[11] if len(landmarks) > 11 else None
+            right_shoulder = landmarks[12] if len(landmarks) > 12 else None
+            left_elbow = landmarks[13] if len(landmarks) > 13 else None
+            right_elbow = landmarks[14] if len(landmarks) > 14 else None
+            left_wrist = landmarks[15] if len(landmarks) > 15 else None
+            right_wrist = landmarks[16] if len(landmarks) > 16 else None
             
             if left_shoulder is None or right_shoulder is None or \
                left_elbow is None or right_elbow is None or \
@@ -2508,16 +2510,17 @@ class VideoBehaviorDetector:
         behaviors = []
         
         try:
-            if not landmarks or len(landmarks) < 13:  # 需要包含臀部和膝盖的关键点
+            if not landmarks or len(landmarks) < 27:  # 需要包含臀部和膝盖的关键点(MediaPipe 23~26)
                 return behaviors
             
             # 获取身体关键点
-            left_shoulder = landmarks[5] if len(landmarks) > 5 else None
-            right_shoulder = landmarks[6] if len(landmarks) > 6 else None
-            left_hip = landmarks[11] if len(landmarks) > 11 else None
-            right_hip = landmarks[12] if len(landmarks) > 12 else None
-            left_knee = landmarks[13] if len(landmarks) > 13 else None
-            right_knee = landmarks[14] if len(landmarks) > 14 else None
+            # MediaPipe 33点索引：肩 11/12，髋 23/24（原 COCO 5/6、11/12 错位）
+            left_shoulder = landmarks[11] if len(landmarks) > 11 else None
+            right_shoulder = landmarks[12] if len(landmarks) > 12 else None
+            left_hip = landmarks[23] if len(landmarks) > 23 else None
+            right_hip = landmarks[24] if len(landmarks) > 24 else None
+            left_knee = landmarks[25] if len(landmarks) > 25 else None
+            right_knee = landmarks[26] if len(landmarks) > 26 else None
             
             if left_hip is None or right_hip is None or \
                left_knee is None or right_knee is None or \
@@ -2574,19 +2577,21 @@ class VideoBehaviorDetector:
         behaviors = []
         
         try:
-            if not landmarks or len(landmarks) < 15:  # 需要包含足够的关键点
+            if not landmarks or len(landmarks) < 25:  # 需要包含足够的关键点(MediaPipe 11~24)
                 return behaviors
             
             # 获取身体关键点
             nose = landmarks[0] if len(landmarks) > 0 else None
-            left_shoulder = landmarks[5] if len(landmarks) > 5 else None
-            right_shoulder = landmarks[6] if len(landmarks) > 6 else None
-            left_elbow = landmarks[7] if len(landmarks) > 7 else None
-            right_elbow = landmarks[8] if len(landmarks) > 8 else None
-            left_wrist = landmarks[9] if len(landmarks) > 9 else None
-            right_wrist = landmarks[10] if len(landmarks) > 10 else None
-            left_hip = landmarks[11] if len(landmarks) > 11 else None
-            right_hip = landmarks[12] if len(landmarks) > 12 else None
+            # MediaPipe 33点索引：肩 11/12，肘 13/14，腕 15/16
+            # （原代码按 COCO 17点索引 5~10 访问，读到的是嘴/眼睛位置，行为判断完全错位）
+            left_shoulder = landmarks[11] if len(landmarks) > 11 else None
+            right_shoulder = landmarks[12] if len(landmarks) > 12 else None
+            left_elbow = landmarks[13] if len(landmarks) > 13 else None
+            right_elbow = landmarks[14] if len(landmarks) > 14 else None
+            left_wrist = landmarks[15] if len(landmarks) > 15 else None
+            right_wrist = landmarks[16] if len(landmarks) > 16 else None
+            left_hip = landmarks[23] if len(landmarks) > 23 else None
+            right_hip = landmarks[24] if len(landmarks) > 24 else None
             
             if left_shoulder is None or right_shoulder is None or \
                left_wrist is None or right_wrist is None:
@@ -2734,16 +2739,18 @@ class VideoBehaviorDetector:
         behaviors = []
         
         try:
-            if not landmarks or len(landmarks) < 10:
+            if not landmarks or len(landmarks) < 17:  # 需要 MediaPipe 11~16(肩肘腕)
                 return behaviors
             
             # 获取手腕和肘部关键点
-            left_shoulder = landmarks[5] if len(landmarks) > 5 else None
-            right_shoulder = landmarks[6] if len(landmarks) > 6 else None
-            left_elbow = landmarks[7] if len(landmarks) > 7 else None
-            right_elbow = landmarks[8] if len(landmarks) > 8 else None
-            left_wrist = landmarks[9] if len(landmarks) > 9 else None
-            right_wrist = landmarks[10] if len(landmarks) > 10 else None
+            # MediaPipe 33点索引：肩 11/12，肘 13/14，腕 15/16
+            # （原代码按 COCO 17点索引 5~10 访问，读到的是嘴/眼睛位置，行为判断完全错位）
+            left_shoulder = landmarks[11] if len(landmarks) > 11 else None
+            right_shoulder = landmarks[12] if len(landmarks) > 12 else None
+            left_elbow = landmarks[13] if len(landmarks) > 13 else None
+            right_elbow = landmarks[14] if len(landmarks) > 14 else None
+            left_wrist = landmarks[15] if len(landmarks) > 15 else None
+            right_wrist = landmarks[16] if len(landmarks) > 16 else None
             
             if left_shoulder is None or right_shoulder is None or \
                left_elbow is None or right_elbow is None or \
@@ -2811,8 +2818,8 @@ class VideoBehaviorDetector:
             
             # 检测手移动到身体中心或口袋位置的行为 - 视频特有检测
             if hasattr(self, '_prev_wrist_positions'):
-                left_hip = landmarks[11] if len(landmarks) > 11 else None
-                right_hip = landmarks[12] if len(landmarks) > 12 else None
+                left_hip = landmarks[23] if len(landmarks) > 23 else None
+                right_hip = landmarks[24] if len(landmarks) > 24 else None
                 
                 current_left_wrist = left_wrist
                 current_right_wrist = right_wrist
@@ -2900,7 +2907,7 @@ class VideoBehaviorDetector:
         behaviors = []
         
         try:
-            if not landmarks or len(landmarks) < 11:  # 至少需要包含躯干的关键点
+            if not landmarks or len(landmarks) < 25:  # 至少需要包含躯干的关键点(MediaPipe 11~24)
                 return behaviors
             
             # 如果没有物体检测结果，不进行身体遮挡检测
@@ -2908,10 +2915,11 @@ class VideoBehaviorDetector:
                 return behaviors
             
             # 获取身体中心
-            left_shoulder = landmarks[5] if len(landmarks) > 5 else None
-            right_shoulder = landmarks[6] if len(landmarks) > 6 else None
-            left_hip = landmarks[11] if len(landmarks) > 11 else None
-            right_hip = landmarks[12] if len(landmarks) > 12 else None
+            # MediaPipe 33点索引：肩 11/12，髋 23/24（原 COCO 5/6、11/12 错位）
+            left_shoulder = landmarks[11] if len(landmarks) > 11 else None
+            right_shoulder = landmarks[12] if len(landmarks) > 12 else None
+            left_hip = landmarks[23] if len(landmarks) > 23 else None
+            right_hip = landmarks[24] if len(landmarks) > 24 else None
             
             if left_shoulder is None or right_shoulder is None or \
                left_hip is None or right_hip is None:
@@ -2973,8 +2981,8 @@ class VideoBehaviorDetector:
             
             # 获取头部关键点
             nose = landmarks[0]
-            left_ear = landmarks[3] if len(landmarks) > 3 else None
-            right_ear = landmarks[4] if len(landmarks) > 4 else None
+            left_ear = landmarks[7] if len(landmarks) > 7 else None
+            right_ear = landmarks[8] if len(landmarks) > 8 else None
             
             if nose is None or left_ear is None or right_ear is None:
                 return behaviors
@@ -3506,24 +3514,24 @@ class VideoBehaviorDetector:
         Returns:
             检测到的行为列表
         """
-        if not landmarks or not isinstance(landmarks, (list, np.ndarray)) or len(landmarks) < 15:
+        if not landmarks or not isinstance(landmarks, (list, np.ndarray)) or len(landmarks) < 25:
             return []
-            
+
         try:
             behaviors = []
-            
-            # 获取左右手腕关键点
-            left_wrist = landmarks[9]
-            right_wrist = landmarks[10]
-            
+
+            # 获取左右手腕关键点（MediaPipe 33点索引）
+            left_wrist = landmarks[15]
+            right_wrist = landmarks[16]
+
             # 获取关键点
             nose = landmarks[0]
-            left_shoulder = landmarks[5]
-            right_shoulder = landmarks[6]
-            left_elbow = landmarks[7]
-            right_elbow = landmarks[8]
-            left_hip = landmarks[11]
-            right_hip = landmarks[12]
+            left_shoulder = landmarks[11]
+            right_shoulder = landmarks[12]
+            left_elbow = landmarks[13]
+            right_elbow = landmarks[14]
+            left_hip = landmarks[23]
+            right_hip = landmarks[24]
             
             # 计算身体中心线
             mid_shoulder_x = (left_shoulder[0] + right_shoulder[0]) / 2

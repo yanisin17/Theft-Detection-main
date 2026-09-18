@@ -10,6 +10,14 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import StreamingResponse
 
 load_dotenv()
+
+# RTSP 拉流选项：走 TCP + 5 秒 socket 超时（stimeout/timeout 分别兼容新旧版 ffmpeg，
+# 不识别的选项会被忽略）。必须在创建第一个 VideoCapture 之前设置。
+os.environ.setdefault(
+    "OPENCV_FFMPEG_CAPTURE_OPTIONS",
+    "rtsp_transport;tcp|stimeout;5000000|timeout;5000000",
+)
+
 from ultralytics import YOLO
 
 # ============================================================
@@ -408,7 +416,7 @@ def _find_evidence_mp4(image_path):
     """
     try:
         stem = os.path.splitext(os.path.basename(image_path))[0]
-        # cam_id 是 UUID（不含下划线），ts 形如 20260915_164734（含下划线）
+        # cam_id 是 UUID（不含下划线），ts 形如 20260915_164734_123456（含下划线）
         _, cam_id, ts = stem.split("_", 2)
         mp4_path = os.path.join(EVIDENCE_DIR, f"evidence_{cam_id}_{ts}.mp4")
         return mp4_path if os.path.exists(mp4_path) else None
@@ -479,59 +487,156 @@ if not os.path.exists("alerts"):
     os.makedirs("alerts")
 
 # --- Threaded Camera Stream ---
+def _expand_env_source(src):
+    """支持 ${VAR} 环境变量占位符，避免摄像头账号密码明文写进 cameras.json"""
+    import re
+    return re.sub(r"\$\{(\w+)\}", lambda m: os.environ.get(m.group(1), m.group(0)), str(src))
+
 class ThreadedCamera:
+    """每路摄像头独立采集线程：只保留最新帧 + 断线自动重连 + 运行统计"""
+
+    RECONNECT_BASE_DELAY = 2.0     # 首次重连等待秒数（之后指数退避）
+    RECONNECT_MAX_DELAY = 30.0
+    MAX_CONSECUTIVE_FAILURES = 15  # 连续读取失败达到该次数触发重连
+
     def __init__(self, src):
-        self.src = src
+        self.src = _expand_env_source(src)
+        self.cap = None
+        self.running = True
+        self.lock = threading.Lock()
+
+        self.frame = None
+        self.frame_ts = 0.0   # 最近一帧的采集时间（墙钟秒）
+        self._captured = 0    # 采集线程累计成功帧数
+        self._consumed = 0    # read() 最近消费到的帧序号
+
+        # 每路摄像头的实际运行状态（第一阶段采集链路监控）
+        self.stats = {
+            "width": 0, "height": 0, "fps": 0.0,
+            "frames_read": 0, "frames_dropped": 0,
+            "read_latency_ms": 0.0, "reconnects": 0,
+            "last_frame_ts": 0.0, "status": "connecting",
+        }
+
+        self._open()
+        self.thread = threading.Thread(target=self.update, args=(), daemon=True)
+        if self.cap is not None:
+            self.thread.start()
+
+    def _open(self):
         try:
-            self.src_val = int(src)
+            src_val = int(self.src)
             is_index = True
-        except:
-            self.src_val = src
+        except ValueError:
+            src_val = self.src
             is_index = False
 
         if is_index and os.name == 'nt':
-            self.cap = cv2.VideoCapture(self.src_val, cv2.CAP_DSHOW)
+            self.cap = cv2.VideoCapture(src_val, cv2.CAP_DSHOW)
         else:
-            self.cap = cv2.VideoCapture(self.src_val)
+            self.cap = cv2.VideoCapture(src_val)
 
         if self.cap.isOpened():
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-            self.ret, self.frame = self.cap.read()
+            try:
+                # 小缓冲：尽量让推理线程拿到最新帧，避免排队处理旧帧
+                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            except Exception:
+                pass
+            # 记录实际输出参数（RTSP 下 set 分辨率并不保证生效）
+            with self.lock:
+                self.stats.update({
+                    "width": int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 0,
+                    "height": int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 0,
+                    "fps": float(self.cap.get(cv2.CAP_PROP_FPS)) or 0.0,
+                    "status": "active",
+                })
+            ret, frame = self.cap.read()
+            if ret:
+                with self.lock:
+                    self._captured += 1
+                    self.frame = frame
+                    self.frame_ts = time.time()
+                    self.stats["frames_read"] += 1
+                    self.stats["last_frame_ts"] = self.frame_ts
         else:
-            self.ret = False
-            self.frame = None
-
-        self.running = True
-        self.lock = threading.Lock()
-        self.thread = threading.Thread(target=self.update, args=(), daemon=True)
-        if self.cap.isOpened():
-            self.thread.start()
+            with self.lock:
+                self.stats["status"] = "error"
 
     def update(self):
+        failures = 0
+        delay = self.RECONNECT_BASE_DELAY
         while self.running:
-            if self.cap.isOpened():
-                ret, frame = self.cap.read()
-                with self.lock:
-                    self.ret = ret
-                    if ret:
-                        self.frame = frame
-                time.sleep(0.01)
-            else:
+            if self.cap is None or not self.cap.isOpened():
                 time.sleep(0.1)
+                continue
+            t0 = time.time()
+            ret, frame = self.cap.read()
+            latency_ms = (time.time() - t0) * 1000.0
+            if ret:
+                failures = 0
+                delay = self.RECONNECT_BASE_DELAY
+                with self.lock:
+                    self._captured += 1
+                    self.frame = frame
+                    self.frame_ts = time.time()
+                    self.stats["frames_read"] += 1
+                    self.stats["read_latency_ms"] = round(latency_ms, 2)
+                    self.stats["last_frame_ts"] = self.frame_ts
+                    self.stats["status"] = "active"
+                time.sleep(0.005)
+            else:
+                failures += 1
+                with self.lock:
+                    self.stats["status"] = "reconnecting"
+                if failures >= self.MAX_CONSECUTIVE_FAILURES:
+                    # 断线重连：释放旧句柄，指数退避后重建连接
+                    with self.lock:
+                        self.stats["reconnects"] += 1
+                    try:
+                        self.cap.release()
+                    except Exception:
+                        pass
+                    time.sleep(delay)
+                    if not self.running:
+                        break
+                    delay = min(delay * 1.5, self.RECONNECT_MAX_DELAY)
+                    self._open()
+                    failures = 0
+                else:
+                    time.sleep(0.1)
 
     def read(self):
         with self.lock:
             if self.frame is not None:
-                return self.ret, self.frame.copy()
+                # 统计两次消费之间被新帧覆盖丢弃的帧数
+                dropped = self._captured - self._consumed - 1
+                if dropped > 0:
+                    self.stats["frames_dropped"] += dropped
+                self._consumed = self._captured
+                return True, self.frame.copy()
             return False, None
 
+    def timestamp(self):
+        with self.lock:
+            return self.frame_ts
+
+    def get_stats(self):
+        with self.lock:
+            return dict(self.stats)
+
     def isOpened(self):
-        return self.cap.isOpened()
+        return self.cap is not None and self.cap.isOpened()
 
     def release(self):
         self.running = False
-        self.cap.release()
+        try:
+            self.thread.join(timeout=1.0)
+        except Exception:
+            pass
+        if self.cap is not None:
+            self.cap.release()
 
 # --- Camera Management ---
 class CameraManager:
@@ -582,7 +687,7 @@ class CameraManager:
             "cap": threaded_cap,
             "name": name,
             "source": source,
-            "status": "active" if threaded_cap.isOpened() else "error",
+            "status": threaded_cap.get_stats().get("status", "error"),
             "roi_points": roi_points,
             "heatmap_accumulator": None,
             "roi_entry_times": {},
@@ -625,13 +730,19 @@ class CameraManager:
 
     def get_active_cameras(self):
         with self.lock:
-            return [{
-                "id": k, 
-                "name": v["name"], 
-                "source": v["source"], 
-                "status": "active" if v["cap"].isOpened() else "error",
-                "roi_points": v.get("roi_points", [])
-            } for k, v in self.cameras.items()]
+            result = []
+            for k, v in self.cameras.items():
+                stats = v["cap"].get_stats() if v.get("cap") else {}
+                result.append({
+                    "id": k,
+                    "name": v["name"],
+                    "source": v["source"],
+                    "status": stats.get("status", "error"),
+                    "roi_points": v.get("roi_points", []),
+                    # 每路摄像头实际分辨率/FPS/读取延迟/丢帧/重连统计
+                    "stats": stats,
+                })
+            return result
 
 camera_manager = CameraManager()
 
@@ -714,7 +825,7 @@ async def save_camera_roi(camera_id: str, data: dict):
                 found = True
         if found:
             # 锁外落盘：save_cameras() 内部会再次获取同一把锁，
-            # 即使是 RLock，也避免在持锁期间做文件 IO
+            # 避免在持锁期间做文件 IO
             camera_manager.save_cameras()
             return {"status": "success", "roi_points": points}
         raise HTTPException(status_code=404, detail="Camera not found")
@@ -730,8 +841,14 @@ async def get_camera_roi(camera_id: str):
 
 
 # --- 项目A行为引擎实时检测参数 ---
-BEHAVIOR_ALERT_THRESHOLD = 0.7   # 高风险行为置信度达到该值才报警
-BEHAVIOR_CHECK_INTERVAL = 6      # 每隔多少帧对同一个人做一次21种行为分析
+# 报警阈值统一收口到 detector_config（可被 detector_tuning.json 覆盖），
+# 避免此处与 detector_config.THEFT_ALERT_THRESHOLD 两处不一致
+BEHAVIOR_ALERT_THRESHOLD = detector_config.THEFT_ALERT_THRESHOLD
+BEHAVIOR_CHECK_INTERVAL = 6      # 聚合行为引擎(21种规则)的采样间隔，兜底通路保持低频即可
+REALTIME_CHECK_INTERVAL = 1      # 实时状态机(伸手→回缩)采样间隔：必须每帧分析。
+                                 # 旧值同 BEHAVIOR_CHECK_INTERVAL=6，多摄像头串行推理下
+                                 # 同一人的实际分析间隔高达 2~4 秒，而"伸手→回缩"
+                                 # 动作 1~2 秒内完成，序列根本凑不齐（漏报主因之一）
 PERSON_GRACE_SECONDS = 10.0      # track_id 消失超过该秒数后清理状态（再次出现可重新报警）
 
 # 行为分档阈值：不是所有行为都同等重要
@@ -864,20 +981,21 @@ def check_object_in_hand(keypoints, object_boxes, hand="LEFT"):
     
     if wrist[0] == 0: return False
     
-    for box in object_boxes:
+    for obj in object_boxes:
+        box = obj['bbox'] if isinstance(obj, dict) else obj
         # Box: x1, y1, x2, y2
         # Check distance from wrist to box center
         box_cx = (box[0] + box[2]) / 2
         box_cy = (box[1] + box[3]) / 2
-        
+
         dist = np.sqrt((wrist[0] - box_cx)**2 + (wrist[1] - box_cy)**2)
-        
+
         # If wrist is CLOSE to object center (e.g. < 100px) OR wrist is INSIDE box
         if dist < 120: # Threshold
             return True
         if box[0] < wrist[0] < box[2] and box[1] < wrist[1] < box[3]:
             return True
-            
+
     return False
 
 def check_concealment(keypoints, reaching_hand):
@@ -918,7 +1036,23 @@ def video_loop():
     
     try:
         print("Loading Pose Model...")
-        model_pose = YOLO('yolov8n-pose.pt') 
+        model_pose = YOLO('yolov8n-pose.pt')
+
+        # P0 修复：多路摄像头必须各用独立的 YOLO 实例做 track。
+        # persist=True 的 tracker 是有状态的（卡尔曼滤波 + 轨迹历史），
+        # 多路摄像头的帧交替喂给同一实例时，预测完全失准导致
+        # track ID 频繁跳变；而行为状态机按 cam_id:track_id 键控，
+        # ID 一跳变，"伸手"与"回缩"就被拆到两个 key 上，序列永远凑不齐。
+        pose_model_path = 'yolov8n-pose.pt'
+        pose_trackers = {}  # cam_id -> 独立 YOLO 实例（各自独立的 tracker 状态）
+
+        def _get_pose_tracker(cid):
+            m = pose_trackers.get(cid)
+            if m is None:
+                m = YOLO(pose_model_path)
+                pose_trackers[cid] = m
+            return m
+
         
         print("Loading Theft Detection Model...")
         try:
@@ -983,16 +1117,34 @@ def video_loop():
                 # Fetch specific camera ROI
                 cam_roi = cam_data.get("roi_points", [])
                 
+                ret = False
                 if cap.isOpened():
                     ret, frame = cap.read()
-                    if not ret: frame = no_signal_frame.copy()
-                else:
+                if not ret:
                     frame = no_signal_frame.copy()
 
-                if cap.isOpened() and 'ret' in locals() and ret:
-                    
+                # 本帧的采集时间戳（ThreadedCamera 记录），随画面与 WS 消息一起下发
+                frame_ts = cap.timestamp() or time.time()
+
+                if ret:
+                    # 推理与人物裁剪始终用未标注的原始帧；标注只画在展示帧上
+                    clean = frame.copy()
+
                     # 1. POSE INFERENCE (Every Frame for tracking)
-                    results_pose = model_pose.track(frame, persist=True, verbose=False, classes=[0]) 
+                    # 每路摄像头使用独立 tracker 实例，消除多路串流导致的 ID 跳变
+                    results_pose = _get_pose_tracker(cam_id).track(clean, persist=True, verbose=False, classes=[0])
+
+                    # 先渲染 YOLO 骨架/检测框，再叠加所有自定义标注，
+                    # 修复 results_pose[0].plot() 覆盖行为文字/热力图/告警框的问题
+                    if results_pose[0].keypoints is not None:
+                        frame = results_pose[0].plot()
+                    frame = get_heatmap_overlay(cam_data, frame)
+
+                    # 帧时间戳（右上角）：便于确认画面不是旧帧
+                    ts_text = datetime.fromtimestamp(frame_ts).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                    ts_x, ts_y = frame.shape[1] - 252, 22
+                    cv2.putText(frame, ts_text, (ts_x + 1, ts_y + 1), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
+                    cv2.putText(frame, ts_text, (ts_x, ts_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
                     
                     # 2. THEFT / OBJECT INFERENCE
                     detected_objects = []
@@ -1000,7 +1152,7 @@ def video_loop():
                     
                     if run_obj_det:
                         if model_is_specialized:
-                            results_obj = model_obj(frame, verbose=False, conf=0.4)
+                            results_obj = model_obj(clean, verbose=False, conf=0.4)
                             if len(results_obj) > 0:
                                 boxes = results_obj[0].boxes.xyxy.cpu().numpy().astype(int)
                                 clss = results_obj[0].boxes.cls.cpu().numpy().astype(int)
@@ -1021,24 +1173,35 @@ def video_loop():
                                          cv2.rectangle(frame, (b[0], b[1]), (b[2], b[3]), (0, 255, 0), 1)
                         else:
                             # Fallback Logic - Target classes for stealable items
-                            TARGET_CLASSES = [24, 25, 26, 28, 39, 40, 41, 42, 43, 67, 73, 74, 75, 76, 77, 78, 79] 
-                            results_obj = model_obj(frame, verbose=False, conf=0.3) 
+                            TARGET_CLASSES = [24, 25, 26, 28, 39, 40, 41, 42, 43, 67, 73, 74, 75, 76, 77, 78, 79]
+                            results_obj = model_obj(clean, verbose=False, conf=0.3)
                             if len(results_obj) > 0:
                                  boxes_obj = results_obj[0].boxes.xyxy.cpu().numpy().astype(int)
                                  cls_obj = results_obj[0].boxes.cls.cpu().numpy().astype(int)
                                  conf_obj = results_obj[0].boxes.conf.cpu().numpy()
-                                 
+
                                  for b, c, conf in zip(boxes_obj, cls_obj, conf_obj):
-                                     if c in TARGET_CLASSES: 
-                                         detected_objects.append(b)
+                                     if c in TARGET_CLASSES:
+                                         # 保留类别名和置信度，供裁剪图坐标系的物体关联使用
+                                         detected_objects.append({
+                                             'bbox': b,
+                                             'class': model_obj.names[c],
+                                             'conf': float(conf),
+                                         })
                                          label = f"ITEM: {model_obj.names[c]} {conf:.2f}"
                                          cv2.rectangle(frame, (b[0], b[1]), (b[2], b[3]), (0, 165, 255), 2)
                                          cv2.putText(frame, label, (b[0], b[1]-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 1)
                     
                     if run_obj_det:
                         cam_data["last_objects"] = detected_objects
+                        cam_data["last_objects_ts"] = current_time
                     else:
-                        detected_objects = cam_data.get("last_objects", [])
+                        # 复用上一轮物体结果，但超过 1 秒的旧框直接丢弃，
+                        # 避免过期物体框参与"手中持物/藏匿"判断
+                        if current_time - cam_data.get("last_objects_ts", 0.0) > 1.0:
+                            detected_objects = []
+                        else:
+                            detected_objects = cam_data.get("last_objects", [])
 
                     if results_pose[0].boxes.id is not None:
                         boxes = results_pose[0].boxes.xyxy.cpu().numpy().astype(int)
@@ -1067,7 +1230,7 @@ def video_loop():
                             if FACE_REC_AVAILABLE and (not p_state.face_checked or (current_time - p_state.face_check_time > 2.0)):
                                 p_state.face_check_time = current_time
                                 fx1, fy1, fx2, fy2 = max(0, box[0]), max(0, box[1]), min(frame.shape[1], box[2]), min(frame.shape[0], box[3])
-                                face_img = frame[fy1:fy2, fx1:fx2]
+                                face_img = clean[fy1:fy2, fx1:fx2]
                                 rgb_face = cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB)
                                 face_locs = face_recognition.face_locations(rgb_face)
                                 if face_locs:
@@ -1123,21 +1286,26 @@ def video_loop():
                             )
                             realtime_confirmed = False
 
-                            if realtime_detector is not None and frame_count % BEHAVIOR_CHECK_INTERVAL == 0:
+                            if realtime_detector is not None and frame_count % REALTIME_CHECK_INTERVAL == 0:
                                 try:
                                     pad = 60
                                     sx1 = max(0, box[0] - pad)
                                     sy1 = max(0, box[1] - pad)
                                     sx2 = min(frame.shape[1], box[2] + pad)
                                     sy2 = min(frame.shape[0], box[3] + pad)
-                                    person_frame = frame[sy1:sy2, sx1:sx2].copy()
+                                    person_frame = clean[sy1:sy2, sx1:sx2].copy()
                                     realtime_event = realtime_detector.analyze(
                                         person_frame, f'{cam_id}:{int(track_id)}'
                                     )
 
                                     if realtime_event is not None:
                                         event_type = realtime_event.get('type', '')
-                                        event_confidence = float(realtime_event.get('confidence', 0.0))
+                                        # 藏匿报警事件返回 alert_score(0.45~0.85 报警分)，
+                                        # 伸手提示仍返回 confidence；两者都兼容
+                                        event_confidence = float(
+                                            realtime_event.get('alert_score',
+                                                               realtime_event.get('confidence', 0.0))
+                                        )
                                         event_alertable = should_trigger_theft_alert(
                                             event_type, event_confidence, sequence_confirmed=True
                                         )
@@ -1201,10 +1369,25 @@ def video_loop():
                                     sy1 = max(0, box[1] - pad)
                                     sx2 = min(frame.shape[1], box[2] + pad)
                                     sy2 = min(frame.shape[0], box[3] + pad)
-                                    sub_frame = frame[sy1:sy2, sx1:sx2].copy()
+                                    sub_frame = clean[sy1:sy2, sx1:sx2].copy()
+
+                                    # 关键修复：检测框统一平移到裁剪图坐标系（减去裁剪偏移量），
+                                    # 否则裁剪图内的手腕/人体位置无法与整帧坐标的物体框正确关联，
+                                    # 导致伸手/拿取/藏匿判断错位。只传物体（人本身由
+                                    # MediaPipe 关键点表示），并使用列表格式（引擎对
+                                    # ultralytics Results 的属性访问从未生效过）。
+                                    shifted_detections = []
+                                    for obj in detected_objects:
+                                        b = obj['bbox'] if isinstance(obj, dict) else obj
+                                        shifted_detections.append({
+                                            'class': obj.get('class', 'object') if isinstance(obj, dict) else 'object',
+                                            'confidence': obj.get('conf', 0.5) if isinstance(obj, dict) else 0.5,
+                                            'bbox': [int(b[0] - sx1), int(b[1] - sy1),
+                                                     int(b[2] - sx1), int(b[3] - sy1)],
+                                        })
 
                                     # 调用项目 A 的行为引擎（21种行为 + 规则引擎）
-                                    all_behaviors = behavior_detector.detect_behaviors_in_image(sub_frame, results_pose[0])
+                                    all_behaviors = behavior_detector.detect_behaviors_in_image(sub_frame, shifted_detections)
 
                                     # 过滤 + 加权求和
                                     current_behaviors = {}  # btype → (conf, weight)
@@ -1380,12 +1563,6 @@ def video_loop():
                                 if track_id in cam_data["roi_entry_times"]:
                                     del cam_data["roi_entry_times"][track_id]
 
-                    frame = get_heatmap_overlay(cam_data, frame) 
-                    
-                    if results_pose[0].keypoints is not None:
-                         res_plotted = results_pose[0].plot()
-                         frame = res_plotted
-
                     if len(cam_roi) > 0:
                         cv2.polylines(frame, [np.array(cam_roi)], isClosed=True, color=(0, 255, 255), thickness=2)
 
@@ -1395,7 +1572,11 @@ def video_loop():
                 frames_payload.append({
                     "camera_id": cam_id,
                     "name": name,
-                    "data": jpg_as_text
+                    "data": jpg_as_text,
+                    # 实际视频宽高：前端 ROI 画布按此尺寸建立坐标系，点击坐标不再偏移
+                    "width": int(frame.shape[1]),
+                    "height": int(frame.shape[0]),
+                    "ts": frame_ts
                 })
 
                 # --- 证据视频：环形缓冲区追加 + 后5秒采集 ---
@@ -1434,6 +1615,10 @@ def video_loop():
                 prune_stale_person_states(time.time())
                 if realtime_detector is not None:
                     realtime_detector.prune()
+                # 清理已删除摄像头的独立 pose tracker，防止实例泄漏
+                active_cam_ids = {cid for cid, _ in current_cams}
+                for stale_cam in set(pose_trackers) - active_cam_ids:
+                    pose_trackers.pop(stale_cam, None)
 
             if frames_payload:
                 with lock:
@@ -1460,7 +1645,8 @@ def trigger_alert(cam_id, cam_name, message, frame, confidence=None, behavior_ty
     global alert_payload
     try:
         print(f"ALERT: {message}")
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # 文件名精确到微秒，避免同一秒内多个告警互相覆盖证据文件
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         filename = f"alerts/alert_{cam_id}_{timestamp}.jpg"
         cv2.imwrite(filename, frame)
 
@@ -1709,14 +1895,16 @@ async def analyze_image(file: UploadFile = File(...)):
 
                 out = rd.analyze(sub, f"img-{i}")
                 if out:
+                    # 藏匿事件带 alert_score，伸手提示带 confidence，两者兼容读取
+                    out_conf = float(out.get('alert_score', out.get('confidence', 0.0)))
                     behaviors.append({
                         "type": out["type"],
                         "description": out.get("phase", ""),
-                        "confidence": out["confidence"]
+                        "confidence": out_conf
                     })
-                    color = (0, 0, 255) if out["confidence"] >= BEHAVIOR_ALERT_THRESHOLD else (0, 165, 255)
+                    color = (0, 0, 255) if out_conf >= BEHAVIOR_ALERT_THRESHOLD else (0, 165, 255)
                     cv2.rectangle(annotated, (box[0], box[1]), (box[2], box[3]), color, 3)
-                    cv2.putText(annotated, f"{out['type']}: {out['confidence']:.0%}",
+                    cv2.putText(annotated, f"{out['type']}: {out_conf:.0%}",
                                 (box[0], box[1]-8), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
                 else:
                     cv2.rectangle(annotated, (box[0], box[1]), (box[2], box[3]), (100,100,100), 2)
@@ -1792,11 +1980,13 @@ async def analyze_video(file: UploadFile = File(...)):
                 sub = frame[sy1:sy2, sx1:sx2].copy()
 
                 out = rd.analyze(sub, f"video-{int(tid)}")
-                if out and out["confidence"] >= 0.50:
+                # 藏匿事件带 alert_score，伸手提示带 confidence，两者兼容读取
+                out_conf = float(out.get('alert_score', out.get('confidence', 0.0))) if out else 0.0
+                if out and out_conf >= 0.50:
                     peak = per_track_peak.get(int(tid))
-                    if peak is None or out["confidence"] > peak[3]:
-                        per_track_peak[int(tid)] = (frame_idx, frame_idx / 30.0, out["type"], out["confidence"])
-                    if out["confidence"] >= BEHAVIOR_ALERT_THRESHOLD:
+                    if peak is None or out_conf > peak[3]:
+                        per_track_peak[int(tid)] = (frame_idx, frame_idx / 30.0, out["type"], out_conf)
+                    if out_conf >= BEHAVIOR_ALERT_THRESHOLD:
                         suspicious_frames.add(frame_idx)
 
         cap.release()
@@ -1829,4 +2019,6 @@ async def analyze_video(file: UploadFile = File(...)):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # 默认只绑定回环地址，避免未认证接口直接暴露到外网；
+    # 需要局域网访问时通过环境变量 HOST=0.0.0.0 显式开启
+    uvicorn.run(app, host=os.getenv("HOST", "127.0.0.1"), port=int(os.getenv("PORT", "8000")))

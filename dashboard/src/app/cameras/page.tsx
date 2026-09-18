@@ -15,6 +15,8 @@ interface CameraFeed {
   camera_id: string;
   name: string;
   data: string;
+  width?: number;
+  height?: number;
 }
 
 export default function CamerasPage() {
@@ -29,6 +31,8 @@ export default function CamerasPage() {
   const [selectedCam, setSelectedCam] = useState<CameraData | null>(null);
   const [roiPoints, setRoiPoints] = useState<number[][]>([]);
   const [activeFrameBase64, setActiveFrameBase64] = useState<string | null>(null);
+  // 画布坐标系使用后端推送的实际视频宽高，避免 ROI 点击坐标偏移
+  const [frameSize, setFrameSize] = useState<{ w: number; h: number }>({ w: 1280, h: 720 });
   const wsRef = useRef<WebSocket | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -74,6 +78,9 @@ export default function CamerasPage() {
           const matched = payload.cameras.find((c: CameraFeed) => c.camera_id === selectedCam.id);
           if (matched) {
             setActiveFrameBase64(matched.data);
+            if (matched.width && matched.height) {
+              setFrameSize({ w: matched.width, h: matched.height });
+            }
           }
         }
       } catch (err) {
@@ -152,7 +159,7 @@ export default function CamerasPage() {
     };
 
     drawCanvas();
-  }, [roiPoints, activeFrameBase64, selectedCam]);
+  }, [roiPoints, activeFrameBase64, selectedCam, frameSize]);
 
   const handleAddCamera = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -443,13 +450,13 @@ export default function CamerasPage() {
                 </span>
               </div>
 
-              <div className="aspect-video w-full bg-slate-200 rounded-lg overflow-hidden border border-glass-border relative flex items-center justify-center">
+              <div className="w-full bg-slate-200 rounded-lg overflow-hidden border border-glass-border relative flex items-center justify-center">
                 <canvas
                   ref={canvasRef}
-                  width={1280}
-                  height={720}
+                  width={frameSize.w}
+                  height={frameSize.h}
                   onClick={handleCanvasClick}
-                  className="w-full h-auto aspect-video cursor-crosshair object-contain"
+                  className="w-full h-auto cursor-crosshair object-contain block"
                 />
               </div>
 

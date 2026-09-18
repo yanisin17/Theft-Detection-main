@@ -14,7 +14,26 @@ interface AlertData {
   message: string;
   timestamp: string;
   camera_id: string;
+  confidence?: number | null;
+  behavior_type?: string | null;
 }
+
+// 常见行为类型的中文展示名（与后端 behavior_type_map 保持一致）
+const BEHAVIOR_LABELS: Record<string, string> = {
+  rapid_item_concealment: "快速藏匿物品",
+  covering_product_area: "遮挡商品区域",
+  unusual_elbow_position: "手肘内收姿态异常",
+  repetitive_position_adjustment: "反复调整位置",
+  suspected_tag_removal: "疑似撕标签动作",
+  suspicious_item_handling: "可疑商品处理",
+  abnormal_arm_position: "手臂位置异常",
+  suspicious_crouching: "可疑蹲姿",
+  unusual_reaching: "不自然的伸手姿势",
+  body_shielding: "身体屏蔽姿势",
+  abnormal_head_movement: "头部异常转动",
+  single_arm_hiding: "单臂遮挡",
+  concealment_gesture: "遮掩隐藏手势",
+};
 
 interface WsPayload {
   type: string;
@@ -27,6 +46,7 @@ export default function CameraGrid() {
   const [cameras, setCameras] = useState<CameraFeed[]>([]);
   const [alertCam, setAlertCam] = useState<string | null>(null);
   const [alertMessage, setAlertMessage] = useState<string>("");
+  const [alertMeta, setAlertMeta] = useState<{ behaviorType: string | null; confidence: number | null }>({ behaviorType: null, confidence: null });
   const [isConnected, setIsConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const alertTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -86,14 +106,19 @@ export default function CameraGrid() {
             if (payload.alert) {
               setAlertCam(payload.alert.camera_id);
               setAlertMessage(payload.alert.message);
+              setAlertMeta({
+                behaviorType: payload.alert.behavior_type ?? null,
+                confidence: typeof payload.alert.confidence === "number" ? payload.alert.confidence : null,
+              });
               playSiren();
-              
+
               if (alertTimeoutRef.current) {
                 clearTimeout(alertTimeoutRef.current);
               }
               alertTimeoutRef.current = setTimeout(() => {
                 setAlertCam(null);
                 setAlertMessage("");
+                setAlertMeta({ behaviorType: null, confidence: null });
               }, 3000);
             }
           }
@@ -153,10 +178,12 @@ export default function CameraGrid() {
                   </div>
                   <div className="flex gap-2 items-center">
                     {isAlerting && (() => {
-                      const m = alertMessage.match(/^BEHAVIOR:\s*(.+?)\s*\(([0-9.]+)\)$/);
-                      if (m) {
-                        const btype = m[1];
-                        const conf = parseFloat(m[2]);
+                      // 优先用后端的结构化字段（behavior_type/confidence），无字段时回退显示消息文本
+                      const btype = alertMeta.behaviorType
+                        ? (BEHAVIOR_LABELS[alertMeta.behaviorType.toLowerCase()] || alertMeta.behaviorType)
+                        : null;
+                      const conf = alertMeta.confidence;
+                      if (btype && conf != null) {
                         const pct = Math.round(conf * 100);
                         const cls = conf >= 0.7
                           ? "bg-danger/15 text-danger border border-danger/25"
@@ -174,7 +201,7 @@ export default function CameraGrid() {
                       return (
                         <span className="flex items-center gap-1 text-xs text-danger font-bold animate-pulse bg-danger/15 px-2 py-0.5 rounded border border-danger/25">
                           <AlertTriangle className="w-3 h-3" />
-                          {alertMessage}
+                          {btype || alertMessage}
                         </span>
                       );
                     })()}

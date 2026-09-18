@@ -48,13 +48,10 @@ export default function HistoryPage() {
   }, [playingAlertId]);
 
   const formatTime = (ts: string) => {
-    if (!ts || ts.length !== 15) return ts;
-    const year = ts.slice(0, 4);
-    const month = ts.slice(4, 6);
-    const day = ts.slice(6, 8);
-    const hour = ts.slice(9, 11);
-    const min = ts.slice(11, 13);
-    const sec = ts.slice(13, 15);
+    // 兼容两种格式：YYYYMMDD_HHMMSS（15位）和 YYYYMMDD_HHMMSS_microseconds（22位，微秒防覆盖）
+    const m = ts?.match(/^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})(?:_(\d{6}))?$/);
+    if (!m) return ts;
+    const [, year, month, day, hour, min, sec] = m;
     return `${year}-${month}-${day} ${hour}:${min}:${sec}`;
   };
 

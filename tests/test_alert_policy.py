@@ -11,10 +11,11 @@ class AlertPolicyTests(unittest.TestCase):
     def test_confirmed_concealment_sequence_triggers_theft_alert(self):
         from detection_engine.alert_policy import should_trigger_theft_alert
 
-        self.assertFalse(should_trigger_theft_alert('Rapid Item Concealment', 0.69))
+        # 默认阈值已校准至 0.6：低于 0.6 不报，达标即报
+        self.assertFalse(should_trigger_theft_alert('Rapid Item Concealment', 0.59))
         self.assertTrue(
             should_trigger_theft_alert(
-                'Rapid Item Concealment', 0.72, sequence_confirmed=True
+                'Rapid Item Concealment', 0.62, sequence_confirmed=True
             )
         )
 
@@ -87,11 +88,15 @@ class DetectorConfigTests(unittest.TestCase):
     def test_default_thresholds_match_documented_values(self):
         from detection_engine import detector_config
 
-        self.assertEqual(detector_config.THEFT_ALERT_THRESHOLD, 0.7)
+        # P1 校准后的默认值：阈值 0.6、关闭二次佐证（COCO 测不到货架商品，
+        # "手中持物"佐证路径失效，保留会漏报单次真实偷窃）
+        self.assertEqual(detector_config.THEFT_ALERT_THRESHOLD, 0.6)
         self.assertEqual(detector_config.RETREAT_MIN, 0.14)
         self.assertEqual(detector_config.OUT_HITS_TO_REACH, 2)
-        self.assertTrue(detector_config.REQUIRE_CORROBORATION)
+        self.assertFalse(detector_config.REQUIRE_CORROBORATION)
         self.assertEqual(detector_config.CORROBORATION_WINDOW, 10.0)
+        # P1：姿态模型升级为 complexity=1（子码流下 0 的关键点抖动过大）
+        self.assertEqual(detector_config.MEDIAPIPE_MODEL_COMPLEXITY, 1)
 
     def test_apply_overrides_updates_known_keys_and_reports_unknown(self):
         import os

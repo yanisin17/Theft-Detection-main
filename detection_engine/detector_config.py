@@ -22,7 +22,10 @@ import json
 import os
 
 # === 报警策略 ===
-THEFT_ALERT_THRESHOLD = 0.7     # 偷盗行为报警的最低置信度
+# P1 校准：0.7 与藏匿事件 alert_score 分布错配（旧公式下典型真实事件只有
+# 0.55~0.65，全部漏报）。降至 0.6 配合 realtime_behavior 的新分数公式，
+# 典型事件(回缩距离 1.2~1.5×阈值)得分 0.65~0.75 可稳定触发报警
+THEFT_ALERT_THRESHOLD = 0.6     # 偷盗行为报警的最低置信度
 
 # === 实时行为状态机(RealtimeBehaviorDetector) ===
 VIS_MIN = 0.35                  # MediaPipe 关键点可见度下限
@@ -32,14 +35,21 @@ REACH_OUT_SIDE_RATIO = 1.05     # 手腕水平距身体中轴 > 肩宽*该系数
 REACH_ARM_ANGLE_MIN = 120       # 向外探判定所需的最小手臂伸直角度(度)
 RETREAT_MIN = 0.14              # 从最远点回缩到躯干的最小归一化距离
 REACH_TIMEOUT = 3.0             # 探出后超过该秒数未回缩则放弃该序列
-MEDIAPIPE_MODEL_COMPLEXITY = 0  # MediaPipe Pose 复杂度 0/1/2,越大越准越慢
+# P1：0 是最粗糙的姿态模型，子码流下远处的人裁剪图仅 100~200px 高，
+# 手腕/手肘关键点抖动大、可见度低。complexity=1 显著更稳，速度可接受
+# （逐人裁剪图 + static_image_mode，单人 ~50-100ms/帧 CPU）
+MEDIAPIPE_MODEL_COMPLEXITY = 1  # MediaPipe Pose 复杂度 0/1/2,越大越准越慢
 MEDIAPIPE_MIN_DETECTION_CONFIDENCE = 0.4
 
 # === 佐证确认机制(降低单次事件误报) ===
 # 单次"伸手→回缩藏匿"事件先挂起,以下任一条件满足才真正报警:
 #   a) 同一 track 在 CORROBORATION_WINDOW 秒内出现第二次藏匿事件
 #   b) 藏匿后确认手中持有可偷物品(check_object_in_hand)
-REQUIRE_CORROBORATION = True
+# P1: 暂时关闭。fallback 物体模型是通用 COCO，TARGET_CLASSES 里没有货架
+# 商品(包装食品/小商品等)，"手中持物"佐证路径基本永远不成立；真实小偷
+# 通常只做一次 → 大量真实偷窃停留在 PENDING CONFIRM 永远不报警。
+# 先关闭跑通召回，待商品检测模型就绪、误报需要压制时再开启
+REQUIRE_CORROBORATION = False
 CORROBORATION_WINDOW = 10.0     # 二次藏匿事件佐证的时间窗(秒)
 
 _TUNING_FILE = os.path.join(

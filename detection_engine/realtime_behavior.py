@@ -262,11 +262,15 @@ class RealtimeBehaviorDetector:
                                      conceal_sig["w"][1] - st.far[1])
                 if retreat >= self.retreat_min:
                     # 完成 “探出拿取 → 回缩藏匿” 序列
-                    # 置信度：基于回缩距离相对于阈值的超额倍数 + 藏匿位置 + 探出猛烈度
-                    # 预期分布：正常 0.72~0.85，典型 0.80~0.92，极端 0.93~0.96
+                    # 报警分：基于回缩距离相对于阈值的超额倍数 + 藏匿位置 + 探出猛烈度
+                    # 校准(P1)：旧公式 base=0.45+0.25×ratio 需要回缩距离达到 2×阈值
+                    # 才能稳过 0.7 报警线，典型真实事件(1.2~1.5×阈值)得分只有
+                    # 0.55~0.65，全部漏报。现改为 base=0.50+0.30×ratio 并配合
+                    # 阈值降至 0.6：刚达标≈0.50~0.59(临界观察)，典型 0.65~0.75
+                    # (触发报警)，极端 0.85(封顶)
                     excess = max(0.0, retreat - self.retreat_min)  # 超出阈值的部分
                     excess_ratio = min(1.0, excess / self.retreat_min)  # 0~1
-                    base = 0.72 + excess_ratio * 0.18  # 0.72~0.90
+                    base = 0.50 + excess_ratio * 0.30  # 0.50~0.80
 
                     # 藏匿位置加成：胯部/裤袋(+0.05) > 躯干藏匿(+0.02)
                     pos_bonus = 0.05 if conceal_sig["on_hip_bag"] else (0.02 if conceal_sig["conceal_zone"] else 0.0)
@@ -275,9 +279,9 @@ class RealtimeBehaviorDetector:
                     reach_fierce = max(0.0, (reaching_sig.get("arm_ang", 180) - self.reach_arm_angle_min) / 60)  # 0~1
                     fierce_bonus = reach_fierce * 0.04
 
-                    conf = float(max(0.72, min(0.96, base + pos_bonus + fierce_bonus)))
+                    conf = float(max(0.45, min(0.85, base + pos_bonus + fierce_bonus)))
                     st.reset()
-                    return {"type": "Rapid Item Concealment", "confidence": conf,
+                    return {"type": "Rapid Item Concealment", "alert_score": conf,
                             "phase": "conceal"}
 
             if now - st.reach_t0 > self.reach_timeout:
