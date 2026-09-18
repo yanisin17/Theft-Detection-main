@@ -30,3 +30,9 @@ evidence_videos/
 *.log
 logs/
 *.db
+
+# Secrets / local environment - 绝不提交真实凭据
+.env
+.env.local
+.env.*.local
+!.env.example

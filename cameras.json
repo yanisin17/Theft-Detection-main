@@ -10,5 +10,11 @@
         "name": "test2",
         "source": "rtsp://admin:a12345678@172.30.20.63:554/Streaming/Channels/102",
         "roi_points": []
+    },
+    {
+        "id": "e9461309-acb7-4872-b508-e53203beea84",
+        "name": "test3",
+        "source": "rtsp://admin:a12345678@172.30.20.61:554/Streaming/Channels/102",
+        "roi_points": []
     }
 ]

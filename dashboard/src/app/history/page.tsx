@@ -11,6 +11,10 @@ interface AlertHistory {
   confidence?: number | null;
   behavior_type?: string | null;
   video_path?: string | null;
+  status?: string | null;
+  vlm_status?: string | null;
+  vlm_reason?: string | null;
+  vlm_confidence?: number | null;
 }
 
 export default function HistoryPage() {
@@ -77,6 +81,10 @@ export default function HistoryPage() {
       matchesType = event.message.includes("THEFT") || event.message.includes("Concealed") ||
         behaviorType.includes("conceal") || behaviorType.includes("hiding") ||
         behaviorType.includes("theft") || behaviorType.includes("shielding");
+    } else if (selectedType === "仅有效告警") {
+      matchesType = event.status !== 'suppressed';
+    } else if (selectedType === "AI已拦截") {
+      matchesType = event.status === 'suppressed';
     }
 
     return matchesSearch && matchesType;
@@ -84,13 +92,15 @@ export default function HistoryPage() {
 
   const handleExportCSV = () => {
     if (filteredHistory.length === 0) return;
-    const headers = ["事件ID", "日期时间", "检测类型", "行为类型", "最高置信度", "证据路径"];
+    const headers = ["事件ID", "日期时间", "检测类型", "行为类型", "最高置信度", "AI复核", "AI判断理由", "证据路径"];
     const rows = filteredHistory.map(event => [
       event.id,
       formatTime(event.timestamp),
       event.message,
       event.behavior_type || "",
       event.confidence != null ? `${Math.round(event.confidence * 100)}%` : "",
+      event.status === 'suppressed' ? '已拦截' : (event.vlm_status === 'confirmed' ? 'AI确认' : ''),
+      event.vlm_reason || "",
       event.image_path
     ]);
     
@@ -152,6 +162,8 @@ export default function HistoryPage() {
             <option className="bg-white">可疑行为</option>
             <option className="bg-white">黑名单人脸</option>
             <option className="bg-white">物品藏匿</option>
+            <option className="bg-white">仅有效告警</option>
+            <option className="bg-white">AI已拦截</option>
           </select>
         </div>
 
@@ -163,6 +175,7 @@ export default function HistoryPage() {
                 <th className="p-4 font-medium">日期时间</th>
                 <th className="p-4 font-medium">检测类型</th>
                 <th className="p-4 font-medium text-center">最高置信度</th>
+                <th className="p-4 font-medium text-center">AI 复核</th>
                 <th className="p-4 font-medium">图片路径</th>
                 <th className="p-4 font-medium text-center">快照</th>
                 <th className="p-4 font-medium text-center">视频</th>
@@ -172,29 +185,30 @@ export default function HistoryPage() {
             <tbody className="text-sm">
               {loading ? (
                 <tr>
-                  <td colSpan={8} className="p-8 text-center text-foreground/60">
+                  <td colSpan={9} className="p-8 text-center text-foreground/60">
                     <Loader2 className="w-6 h-6 animate-spin mx-auto mb-2" />
                     正在加载历史记录...
                   </td>
                 </tr>
               ) : filteredHistory.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="p-8 text-center text-foreground/60">
+                  <td colSpan={9} className="p-8 text-center text-foreground/60">
                     未找到符合搜索条件的告警记录。
                   </td>
                 </tr>
               ) : (
                 filteredHistory.map((event) => (
-                  <tr key={event.id} className="border-b border-glass-border/50 hover:bg-slate-100 transition-colors">
+                  <tr key={event.id} className={`border-b border-glass-border/50 hover:bg-slate-100 transition-colors ${event.status === 'suppressed' ? 'bg-slate-100/70' : ''}`}>
                     <td className="p-4 font-mono text-brand text-xs">{event.id.slice(0, 8)}...</td>
                     <td className="p-4 text-foreground/80">{formatTime(event.timestamp)}</td>
                     <td className="p-4">
                       <span className={`inline-block px-2 py-1 rounded text-xs font-semibold ${
+                        event.status === 'suppressed' ? 'bg-slate-400/20 text-slate-500 border border-slate-400/30' :
                         event.message.includes('THEFT') || event.message.includes('CRIMINAL') || event.message.startsWith('BEHAVIOR:') ? 'bg-danger/20 text-danger border border-danger/20' : 
                         event.message.includes('BLACKLIST') || event.message.includes('RESTRICTED') ? 'bg-orange-500/20 text-orange-400 border border-orange-500/20' :
                         'bg-blue-500/20 text-blue-400 border border-blue-500/20'
                       }`}>
-                        {event.behavior_type || event.message}
+                        {event.status === 'suppressed' ? `AI已拦截 · ${event.behavior_type || ''}` : (event.behavior_type || event.message)}
                       </span>
                     </td>
                     <td className="p-4 text-center">
@@ -208,6 +222,25 @@ export default function HistoryPage() {
                         </span>
                       ) : (
                         <span className="text-foreground/30 text-xs">—</span>
+                      )}
+                    </td>
+                    <td className="p-4 text-center">
+                      {event.status === 'suppressed' ? (
+                        <span
+                          className="inline-block px-2 py-1 rounded text-xs font-semibold bg-slate-400/20 text-slate-500 border border-slate-400/30 cursor-help"
+                          title={event.vlm_reason ? `AI判断理由: ${event.vlm_reason}` : 'AI判断为非偷盗行为，已拦截（不推送/不通知）'}
+                        >
+                          已拦截
+                        </span>
+                      ) : event.vlm_status === 'confirmed' ? (
+                        <span
+                          className="inline-block px-2 py-1 rounded text-xs font-semibold bg-emerald-500/15 text-emerald-600 border border-emerald-500/25 cursor-help"
+                          title={event.vlm_reason ? `AI判断理由: ${event.vlm_reason}` : ''}
+                        >
+                          AI确认{event.vlm_confidence != null ? ` ${Math.round(event.vlm_confidence * 100)}%` : ''}
+                        </span>
+                      ) : (
+                        <span className="text-foreground/30 text-xs" title="VLM 未启用或复核失败，告警直接放行">—</span>
                       )}
                     </td>
                     <td className="p-4 font-mono text-xs text-foreground/60">{event.image_path}</td>

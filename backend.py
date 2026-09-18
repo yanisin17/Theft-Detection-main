@@ -37,6 +37,17 @@ try:
     REALTIME_ENGINE_AVAILABLE = True
 except Exception as e:
     print(f"Realtime behavior engine not loaded: {e}")
+
+# VLM 报警复核层（视觉大模型二次确认，fail-open：未配置/失败一律放行报警）
+try:
+    from vlm_filter import review_theft as _vlm_review, vlm_enabled as _vlm_enabled
+    if _vlm_enabled():
+        print("VLM review layer enabled.")
+    else:
+        print("VLM review layer disabled (VLM_API_KEY not set) - alerts pass through without AI review.")
+except Exception as e:
+    _vlm_review = None
+    print(f"VLM review layer not loaded: {e}")
 import numpy as np
 import time
 from datetime import datetime
@@ -97,7 +108,9 @@ def init_db():
         c.execute('''CREATE TABLE IF NOT EXISTS faces
                      (id TEXT PRIMARY KEY, name TEXT, type TEXT, encoding BLOB)''')
         # 轻量迁移：老数据库补列（已存在则忽略）
-        for col, decl in [("confidence", "REAL"), ("behavior_type", "TEXT"), ("track_id", "INTEGER"), ("video_path", "TEXT")]:
+        for col, decl in [("confidence", "REAL"), ("behavior_type", "TEXT"), ("track_id", "INTEGER"),
+                          ("video_path", "TEXT"), ("status", "TEXT DEFAULT 'active'"),
+                          ("vlm_status", "TEXT"), ("vlm_reason", "TEXT"), ("vlm_confidence", "REAL")]:
             try:
                 c.execute(f"ALTER TABLE alerts ADD COLUMN {col} {decl}")
                 print(f"DB migrated: alerts.{col} added.")
@@ -934,6 +947,11 @@ def video_loop():
         return
 
     frame_count = 0
+    # 每路摄像头独立的姿态模型实例：共用一个实例时多路交替推理会互相污染
+    # tracker 的时序状态，导致 boxes.id 始终为 None，整条告警链路被跳过
+    pose_models = {}
+    # 低置信度建轨配置：远处/小目标人物（conf 0.1~0.25）也能分配 track ID
+    TRACKER_CFG = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'trackers', 'botsort_lowconf.yaml')
     no_signal_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
     cv2.putText(no_signal_frame, "SINYAL YOK", (400, 360), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 3)
 
@@ -942,19 +960,19 @@ def video_loop():
             with camera_manager.lock:
                 current_cams = list(camera_manager.cameras.items())
 
-            frames_payload = [] 
-            
+            frames_payload = []
+
             # Optimization: Run Object Det every 5 frames
             run_obj_det = (frame_count % 5 == 0) and (model_obj is not None)
-            
+
             for cam_id, cam_data in current_cams:
                 cap = cam_data["cap"]
                 name = cam_data["name"]
                 current_time = time.time()
-                
+
                 # Fetch specific camera ROI
                 cam_roi = cam_data.get("roi_points", [])
-                
+
                 if cap.isOpened():
                     ret, frame = cap.read()
                     if not ret: frame = no_signal_frame.copy()
@@ -962,9 +980,11 @@ def video_loop():
                     frame = no_signal_frame.copy()
 
                 if cap.isOpened() and 'ret' in locals() and ret:
-                    
+
                     # 1. POSE INFERENCE (Every Frame for tracking)
-                    results_pose = model_pose.track(frame, persist=True, verbose=False, classes=[0]) 
+                    if cam_id not in pose_models:
+                        pose_models[cam_id] = YOLO('yolov8n-pose.pt')
+                    results_pose = pose_models[cam_id].track(frame, persist=True, verbose=False, classes=[0], tracker=TRACKER_CFG)
                     
                     # 2. THEFT / OBJECT INFERENCE
                     detected_objects = []
@@ -1207,19 +1227,16 @@ def video_loop():
                                         cv2.putText(frame, behavior_labels, (box[0], box[3] + 44),
                                                     cv2.FONT_HERSHEY_SIMPLEX, 0.35, (100, 100, 100), 1)
 
-                                    # === 最终判定：偷盗概率 ≥ 0.5 → is_theft = True ===
+                                    # === 最终判定：偷盗概率 ≥ 0.5 → 触发报警 ===
+                                    # VLM 复核在线程中异步执行（fail-open），避免阻塞视频循环
                                     if (not p_state.alert_fired) and p_state.theft_probability >= 0.5:
-                                        alert_id = trigger_alert(
-                                            cam_id, name,
-                                            f"THEFT: {cn_label} | 概率={p_state.theft_probability:.2f} | "
-                                            f"rule={p_state.rule_prob:.2f} continuity={p_state.continuity_bonus:.2f} sequence={'Y' if p_state.sequence_detected else 'N'}",
-                                            frame,
-                                            confidence=p_state.theft_probability,
-                                            behavior_type=p_state.top_behavior,
-                                            track_id=int(track_id)
-                                        )
-                                        p_state.alert_fired = True
-                                        p_state.alert_id = alert_id
+                                        p_state.alert_fired = True   # 先占位，防止复核期间重复触发
+                                        review_frames = _collect_review_frames(cam_id, sub_frame, box)
+                                        threading.Thread(
+                                            target=_vlm_review_and_alert,
+                                            args=(cam_id, name, cn_label, p_state, frame.copy(), review_frames),
+                                            daemon=True
+                                        ).start()
                                         cv2.rectangle(frame, (box[0], box[1]), (box[2], box[3]), (0, 0, 255), 3)
                                     elif p_state.alert_fired and p_state.alert_id:
                                         update_alert_peak(p_state.alert_id, p_state.top_behavior, p_state.max_confidence)
@@ -1343,45 +1360,133 @@ def video_loop():
             time.sleep(1)
 
 
-def trigger_alert(cam_id, cam_name, message, frame, confidence=None, behavior_type=None, track_id=None):
-    """触发一次报警并写入数据库。返回 alert_id（供同一人后续回写 MAX CONFIDENCE + 证据视频关联）"""
+def _collect_review_frames(cam_id, current_sub, box, max_past=3, pad=60):
+    """收集 VLM 复核素材：当前人物子图 + 环形缓冲区约 1~3 秒前的历史帧（同一 box 近似裁剪），
+    按时间先后排序返回，最多 max_past+1 帧"""
+    frames = []
+    buf = frame_buffers.get(cam_id)
+    if buf:
+        n = len(buf)
+        for back in (30, 20, 10):   # 约 3s/2s/1s 前（子码流 ~10fps 估算）
+            if n > back:
+                try:
+                    arr = np.frombuffer(buf[-1 - back], dtype=np.uint8)
+                    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                except Exception:
+                    img = None
+                if img is None:
+                    continue
+                sy1, sy2 = max(0, box[1] - pad), min(img.shape[0], box[3] + pad)
+                sx1, sx2 = max(0, box[0] - pad), min(img.shape[1], box[2] + pad)
+                if sx2 - sx1 < 40 or sy2 - sy1 < 40:
+                    continue
+                frames.append(img[sy1:sy2, sx1:sx2].copy())
+    if current_sub is not None:
+        frames.append(current_sub)
+    return frames[:max_past + 1]
+
+
+def _vlm_review_and_alert(cam_id, cam_name, cn_label, p_state, frame, review_frames):
+    """后台线程：VLM 复核疑似偷盗 → 通过则正常报警，拦截则落库 suppressed（不推送）。
+    全程 fail-open：复核失败/超时/未配置一律照常报警（vlm_status=bypassed）"""
+    # 先快照判定数据，避免与主循环并发更新竞争
+    prob = p_state.theft_probability
+    rule = p_state.rule_prob
+    cont = p_state.continuity_bonus
+    seq = p_state.sequence_detected
+    behavior = p_state.top_behavior
+    track_id = p_state.track_id
+    base_msg = (f"THEFT: {cn_label} | 概率={prob:.2f} | "
+                f"rule={rule:.2f} continuity={cont:.2f} sequence={'Y' if seq else 'N'}")
+    try:
+        result = _vlm_review(review_frames) if _vlm_review is not None else None
+    except Exception as e:
+        print(f"[VLM] 复核线程异常(fail-open放行): {e}")
+        result = None
+
+    if result is not None and not result.get('is_theft', True):
+        # AI 判定非偷盗：拦截，落库标记 suppressed（保留截图与结论供统计/调优）
+        reason = result.get('reason', '')
+        alert_id = trigger_alert(
+            cam_id, cam_name,
+            f"{base_msg} | AI拦截: {reason[:100]}",
+            frame,
+            confidence=prob,
+            behavior_type=behavior,
+            track_id=int(track_id),
+            suppressed=True,
+            vlm_status='suppressed', vlm_reason=reason, vlm_confidence=result.get('confidence'),
+        )
+        p_state.alert_id = alert_id
+        print(f"[VLM] 告警被 AI 过滤(已落库suppressed): {reason[:80]}")
+    else:
+        reason = result.get('reason', '') if result else ''
+        conf = result.get('confidence', 0) if result else 0
+        if result:
+            msg = f"{base_msg} | AI复核: {reason[:100]}({conf:.2f})"
+            print(f"[VLM] AI 复核通过: {reason[:80]}")
+        else:
+            msg = base_msg
+        alert_id = trigger_alert(
+            cam_id, cam_name, msg, frame,
+            confidence=prob,
+            behavior_type=behavior,
+            track_id=int(track_id),
+            vlm_status='confirmed' if result else 'bypassed',
+            vlm_reason=reason or None,
+            vlm_confidence=result.get('confidence') if result else None,
+        )
+        p_state.alert_id = alert_id
+
+
+def trigger_alert(cam_id, cam_name, message, frame, confidence=None, behavior_type=None, track_id=None,
+                  suppressed=False, vlm_status=None, vlm_reason=None, vlm_confidence=None):
+    """触发一次报警并写入数据库。返回 alert_id（供同一人后续回写 MAX CONFIDENCE + 证据视频关联）
+
+    suppressed=True: VLM 复核拦截的告警——仅落库标记 + 存图，不推前端、不采集证据视频、不发通知
+    vlm_*: 视觉大模型复核结论（confirmed/suppressed/bypassed）
+    """
     global alert_payload
     try:
-        print(f"ALERT: {message}")
+        status = 'suppressed' if suppressed else 'active'
+        print(f"ALERT[{status}]: {message}")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"alerts/alert_{cam_id}_{timestamp}.jpg"
         cv2.imwrite(filename, frame)
 
-        # --- 证据视频：冻结该摄像头的前5秒环形缓冲，启动后5秒采集 ---
-        alert_id_for_video = None
-        pending_old = evidence_pending.get(cam_id)
-        if pending_old is None:
-            buf = frame_buffers.get(cam_id)
-            pre = list(buf) if buf else []   # 冻结前5秒 JPEG bytes
-            evidence_pending[cam_id] = {
-                "pre_frames": pre,
-                "post_frames": [],
-                "post_remaining": POST_FRAMES,
-                "alert_id": None,   # INSERT 成功后回填
-                "ts": timestamp,
-                "cam_name": cam_name,
-            }
-        else:
-            print(f"[Evidence] 该摄像头已有证据视频在采集，跳过本次")
+        # --- 证据视频：冻结该摄像头的前5秒环形缓冲，启动后5秒采集（suppressed 不采集）---
+        if not suppressed:
+            pending_old = evidence_pending.get(cam_id)
+            if pending_old is None:
+                buf = frame_buffers.get(cam_id)
+                pre = list(buf) if buf else []   # 冻结前5秒 JPEG bytes
+                evidence_pending[cam_id] = {
+                    "pre_frames": pre,
+                    "post_frames": [],
+                    "post_remaining": POST_FRAMES,
+                    "alert_id": None,   # INSERT 成功后回填
+                    "ts": timestamp,
+                    "cam_name": cam_name,
+                }
+            else:
+                print(f"[Evidence] 该摄像头已有证据视频在采集，跳过本次")
 
         # database
         conn = sqlite3.connect(DB_NAME)
         c = conn.cursor()
         alert_id = str(uuid.uuid4())
         c.execute(
-            "INSERT INTO alerts (id, message, timestamp, image_path, confidence, behavior_type, track_id) VALUES (?,?,?,?,?,?,?)",
-            (alert_id, message, timestamp, filename, confidence, behavior_type, track_id)
+            "INSERT INTO alerts (id, message, timestamp, image_path, confidence, behavior_type, track_id, status, vlm_status, vlm_reason, vlm_confidence) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (alert_id, message, timestamp, filename, confidence, behavior_type, track_id, status, vlm_status, vlm_reason, vlm_confidence)
         )
         # 如果已有证据视频在等待，回填 alert_id
-        if cam_id in evidence_pending:
+        if not suppressed and cam_id in evidence_pending:
             evidence_pending[cam_id]["alert_id"] = alert_id
         conn.commit()
         conn.close()
+
+        if suppressed:
+            return alert_id  # 被拦截的告警到此为止，不推送不通知
 
         with lock:
             alert_payload = {
@@ -1393,7 +1498,7 @@ def trigger_alert(cam_id, cam_name, message, frame, confidence=None, behavior_ty
                 "confidence": confidence,
                 "behavior_type": behavior_type
             }
-            
+
         # Send Email/Telegram if enabled (Settings)
         # We can implement a fire-and-forget thread for this to not block loop
         threading.Thread(target=send_notifications, args=(message, filename)).start()

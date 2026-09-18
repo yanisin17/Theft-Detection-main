@@ -23,8 +23,8 @@ if exist "%DASHBOARD_DIR%\node_modules" (
 )
 
 :: 2. Start Backend (in new window, using test02 virtualenv)
-echo [2/3] Starting Backend Service (Python/FastAPI, venv: test02)...
-start "Theft Guard Backend" cmd /k "cd /d "%PROJECT_DIR%" && "%PROJECT_DIR%test02\Scripts\python.exe" backend.py"
+echo [2/3] Starting Backend Service (Python/FastAPI, venv: .venv)...
+start "Theft Guard Backend" cmd /k "cd /d "%PROJECT_DIR%" && "%PROJECT_DIR%.venv\Scripts\python.exe" backend.py"
 
 :: Wait for backend to initialize (YOLO + MediaPipe + XGBoost loading takes longer)
 timeout /t 12 /nobreak >nul
